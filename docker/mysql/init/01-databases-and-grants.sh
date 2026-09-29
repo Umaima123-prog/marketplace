@@ -21,11 +21,18 @@ set -euo pipefail
 
 APP_DB="${MYSQL_DATABASE:-marketplace}"
 SHADOW_DB="${MYSQL_SHADOW_DATABASE:-marketplace_shadow}"
+# The integration suite's own database. Created here so a fresh clone can run
+# `npm run test:integration` without a manual step -- it was previously created by
+# hand, which meant the documented setup did not actually work from scratch.
+# The name must end in `_test`: the test harness refuses to run otherwise, because
+# those tests TRUNCATE every table.
+TEST_DB="${MYSQL_TEST_DATABASE:-${APP_DB}_test}"
 APP_USER="${MYSQL_USER:?MYSQL_USER must be set}"
 APP_PASSWORD="${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}"
 
 echo "[init] app database    : ${APP_DB}"
 echo "[init] shadow database : ${SHADOW_DB}"
+echo "[init] test database   : ${TEST_DB}"
 echo "[init] application user: ${APP_USER}"
 
 # --protocol=socket keeps this on the local unix socket, so the root password
@@ -37,16 +44,20 @@ mysql --protocol=socket -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
 	CREATE DATABASE IF NOT EXISTS \`${SHADOW_DB}\`
 	  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+	CREATE DATABASE IF NOT EXISTS \`${TEST_DB}\`
+	  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 	CREATE USER IF NOT EXISTS '${APP_USER}'@'%'
 	  IDENTIFIED BY '${APP_PASSWORD}';
 
-	-- ALL PRIVILEGES scoped to these two schemas only. This covers everything
+	-- ALL PRIVILEGES scoped to these three schemas only. This covers everything
 	-- Prisma Migrate needs (CREATE/ALTER/DROP TABLE, INDEX, REFERENCES) while
 	-- granting nothing server-wide.
 	GRANT ALL PRIVILEGES ON \`${APP_DB}\`.*    TO '${APP_USER}'@'%';
 	GRANT ALL PRIVILEGES ON \`${SHADOW_DB}\`.* TO '${APP_USER}'@'%';
+	GRANT ALL PRIVILEGES ON \`${TEST_DB}\`.*   TO '${APP_USER}'@'%';
 
 	FLUSH PRIVILEGES;
 EOSQL
 
-echo "[init] done: '${APP_USER}' has full privileges on ${APP_DB} and ${SHADOW_DB}"
+echo "[init] done: '${APP_USER}' has full privileges on ${APP_DB}, ${SHADOW_DB} and ${TEST_DB}"

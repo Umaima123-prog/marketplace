@@ -42,6 +42,8 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-marketplace}
       # Not a stock MySQL variable — read by our init script below.
       MYSQL_SHADOW_DATABASE: ${MYSQL_SHADOW_DATABASE:-marketplace_shadow}
+      # Also read by the init script, not by MySQL itself.
+      MYSQL_TEST_DATABASE: ${MYSQL_TEST_DATABASE:-marketplace_test}
 
     ports:
       - "${MYSQL_HOST_PORT:-3307}:3306"
