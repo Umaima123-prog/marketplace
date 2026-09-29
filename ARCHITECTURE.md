@@ -129,6 +129,18 @@ restarts from page 0. Chained page jobs lose **one page** to a crash.
 **Scope:** all catalog products are synced. The storefront shows only `status = ACTIVE` **and**
 `isActive = true`. No sales-channel publication filtering.
 
+**Consequence, observed live and left as-is:** the development store contains a product whose
+handle is `the-hidden-snowboard`. It is `ACTIVE` in Shopify, so the storefront lists it. "Hidden"
+there refers to sales-channel publication -- a product can be active yet unpublished to the Online
+Store -- and this project deliberately does not read publication state. Filtering it would need
+`publishedOnCurrentPublication` (or a `publications` query) in the sync, a column to store it, and
+a third condition in the storefront predicate.
+
+That is a scope decision, not a defect, and it is stated here rather than quietly patched: a
+merchant who unpublishes a product from the Online Store while leaving it active will still see it
+on this storefront. If that matters, the fix belongs in the SYNC (store the publication flag), not
+in a storefront filter that would silently disagree with the data it reads.
+
 - Upsert keyed on `shopifyProductId` / `shopifyVariantId`.
 - **`Prisma.upsert` is not atomic on MySQL** — it may emit SELECT-then-write rather than
   `INSERT ... ON DUPLICATE KEY UPDATE`. Concurrent page jobs racing the same new product will
@@ -281,6 +293,55 @@ that `variantSyncComplete` flips to true only on `hasNextPage: false`. Creating 
 | S7 | **`variant-sync` infers `currencyCode` from an already-written sibling variant.** A product whose inline variant page wrote nothing would fall back to `"USD"`. | Unreachable today -- a chain only exists when the inline page wrote 100 variants. | Accepted, guarded by the fallback. |
 
 ---
+
+---
+
+## 3a. Storefront (Phase 3)
+
+Implemented and verified against the 17 real synced products.
+
+| Concern | File |
+|---|---|
+| The only catalog read path | `src/server/catalog/catalog.service.ts` (`server-only`) |
+| Decimal-safe money | `src/lib/money.ts` |
+| Layout, navbar, card | `src/components/storefront/*` (server components) |
+| Variant selector, gallery | `src/components/storefront/ProductPurchasePanel.tsx` (the only `"use client"`) |
+| Pages | `app/page.tsx`, `app/products/[handle]/page.tsx` |
+
+**The storefront never calls Shopify.** Proven, not asserted: the app was run with
+`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ADMIN_ACCESS_TOKEN`
+and `SHOPIFY_API_VERSION` blanked via `.env.local` (which Next loads with higher precedence than
+`.env`). Listing and detail both returned 200 with full data, and the server log contained zero
+Shopify lines. Had any storefront path touched the Admin API, `shopifyEnv()` would have raised a
+terminal "not configured" error and the page would have 500'd.
+
+**Prisma cannot reach a client component.** `catalog.service.ts` imports `server-only`, so an
+import from a `"use client"` module is a build error rather than a convention. Nothing in `app/`
+or `src/components/` imports Prisma or `src/lib/shopify/*`.
+
+**Money never becomes a number.** Prices are `DECIMAL(18,4)` in MySQL, `Decimal` from Prisma, and
+exact decimal strings everywhere after that. `formatMoney` resolves the currency symbol through
+`Intl` using a zero amount and substitutes the real digits, because `Intl.NumberFormat` takes a
+`number` and would defeat the point. `normalizeMoney` exists because `Decimal.toString()` strips
+trailing zeros -- `15.0000` arrived as `"15"` next to `"9.99"`.
+
+**Query shape.** Listing is one `findMany` with nested `select`; Prisma resolves each relation in
+one additional query, so it is three queries regardless of product count, not 1 + 2N.
+`descriptionHtml` is not selected for cards. Ordering is `publishedAt DESC, id DESC`, matching the
+`(isActive, publishedAt, id)` index, with keyset pagination (never `OFFSET`) whose predicate
+handles the trailing `publishedAt IS NULL` group explicitly -- `publishedAt < x` is NULL, not
+true, for those rows.
+
+### 3a.1 Storefront known gaps
+
+| # | Gap | Status |
+|---|---|---|
+| F1 | **No `use cache` / `cacheLife`.** Both pages are `force-dynamic`, so every request hits MySQL. | Open. The intended design (§3.5) is time-based caching with a lifetime no longer than the sync interval. |
+| F2 | **`next/image` bypassed.** Images render through `<img>`; using `next/image` needs every Shopify CDN host allow-listed in `next.config.ts`. | Open, two lint warnings record it. |
+| F3 | **AdminLTE is vendored, not installed.** `vendor/adminlte/adminlte.min.css` (MIT). The npm package pulls ~60 transitive dependencies to deliver one stylesheet and cannot install reproducibly -- a transitive `husky` prepare script fails on a machine without husky, which left the package missing from `package.json` while its files sat in `node_modules`. | Closed by vendoring; the file header records version, provenance and update steps. |
+| F4 | **No page-level rendering test.** Correctness is covered at the service layer and by manual checks; nothing automated asserts the pages render. | Open. Playwright would close it. |
+| F5 | **Keyset pagination never exercised live.** 15 products fit one 24-card page. | Open; unit-tested, and the integration suite pages through a seeded set. |
+| F6 | **Publication state is not synced**, so an active-but-unpublished product appears on the storefront (see §3.4). | Open, deliberate. |
 
 ---
 

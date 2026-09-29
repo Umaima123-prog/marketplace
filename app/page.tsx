@@ -1,69 +1,66 @@
-import Image from "next/image";
+import { StorefrontLayout } from "@/src/components/storefront/StorefrontLayout";
+import { ProductCard } from "@/src/components/storefront/ProductCard";
+import { listProducts } from "@/src/server/catalog/catalog.service";
 
-export default function Home() {
+/**
+ * Catalog listing.
+ *
+ * A server component reading MySQL through the catalog service. It makes no
+ * Shopify request -- the storefront never does. Everything on this page was put
+ * in MySQL by the sync worker, in a different process, minutes earlier.
+ */
+export const dynamic = "force-dynamic";
+
+export default async function CatalogPage({
+  searchParams,
+}: {
+  // Next 16: searchParams is async and must be awaited.
+  searchParams: Promise<{ cursor?: string }>;
+}) {
+  const { cursor } = await searchParams;
+  const { products, nextCursor } = await listProducts({ cursor });
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <StorefrontLayout
+      title="Catalog"
+      subtitle={
+        products.length > 0
+          ? `${products.length} product${products.length === 1 ? "" : "s"}`
+          : undefined
+      }
+    >
+      {products.length === 0 ? (
+        // An empty catalog is a legitimate state -- a store with nothing
+        // published, or a sync that has not run yet -- and says so plainly
+        // rather than rendering an empty grid that looks broken.
+        <div className="card">
+          <div className="card-body text-center py-5">
+            <h2 className="h5">No products available</h2>
+            <p className="text-muted mb-0">
+              Nothing is published yet, or the catalog has not been synchronised.
+            </p>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      ) : (
+        <>
+          <div className="row">
+            {products.map((product) => (
+              <div className="col-12 col-sm-6 col-lg-4 col-xl-3 mb-4 d-flex" key={product.handle}>
+                <ProductCard product={product} />
+              </div>
+            ))}
+          </div>
+
+          {nextCursor ? (
+            <div className="text-center mb-4">
+              {/* Keyset pagination: the cursor names the last row, never an offset. */}
+              <a className="btn btn-outline-primary" href={`/?cursor=${encodeURIComponent(nextCursor)}`}>
+                Next page
+              </a>
+            </div>
+          ) : null}
+        </>
+      )}
+    </StorefrontLayout>
   );
 }

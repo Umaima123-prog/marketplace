@@ -1,26 +1,64 @@
-@import "tailwindcss";
+/*
+ * AdminLTE 3.2.0 on top of Bootstrap 4.6, imported as CSS only. AdminLTE is
+ * vendored at vendor/adminlte/adminlte.min.css.
+ *
+ * AdminLTE ships a large JavaScript layer built on jQuery; none of it is loaded
+ * here. Everything interactive in this app is a React component, so pulling in
+ * jQuery would mean two things mutating the same DOM -- which is how an
+ * AdminLTE-in-React integration usually breaks.
+ *
+ * Tailwind was removed from this file on purpose: its preflight resets the base
+ * element styles Bootstrap relies on, so the two cannot share a page without one
+ * of them losing. AdminLTE is the design system this project committed to
+ * (ARCHITECTURE §2), so Tailwind gives way.
+ */
+/*
+ * The vendor stylesheets are imported from app/layout.tsx, not with @import
+ * here: a bare specifier inside a CSS file is resolved by PostCSS, which has no
+ * node_modules resolution, so `@import "admin-lte/..."` fails the build. Next
+ * resolves a JS `import "admin-lte/dist/css/adminlte.min.css"` correctly, and
+ * the import order in layout.tsx keeps the cascade the same.
+ */
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Storefront-specific touches. Namespaced so they cannot collide with AdminLTE. */
+.storefront-card-image {
+  height: 220px;
+  object-fit: contain;
+  background: #f8f9fa;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+.storefront-card-image--placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #adb5bd;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.storefront-gallery-main {
+  max-height: 420px;
+  object-fit: contain;
+  background: #f8f9fa;
+  width: 100%;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.storefront-gallery-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+
+.storefront-gallery-thumb--active {
+  border-color: #007bff;
+}
+
+.storefront-price-compare {
+  text-decoration: line-through;
+  color: #6c757d;
+}
+
+.storefront-description img {
+  max-width: 100%;
+  height: auto;
 }

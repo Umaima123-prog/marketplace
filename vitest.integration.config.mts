@@ -25,6 +25,15 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: { "@": path.resolve(import.meta.dirname) },
+    alias: {
+      "@": path.resolve(import.meta.dirname),
+      // `server-only` throws unless the bundler sets the "react-server" export
+      // condition. That guard is the point in the app -- importing a server
+      // module from a client component must fail the build -- but a plain Node
+      // test runner sets no such condition, so it resolves to the throwing
+      // build. Point it at the package's own no-op instead: the guard keeps
+      // working where it matters (next build), and server-side tests can run.
+      "server-only": path.resolve(import.meta.dirname, "node_modules/server-only/empty.js"),
+    },
   },
 });
