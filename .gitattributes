@@ -1,0 +1,9 @@
+# Shell scripts run inside Linux containers. A CRLF checkout on Windows turns
+# the shebang into "#!/bin/bash\r" and the container fails with
+# "bad interpreter: /bin/bash^M: no such file or directory".
+*.sh text eol=lf
+
+# Keep SQL and compose files LF too — they are read by Linux tooling.
+*.sql text eol=lf
+docker-compose.yml text eol=lf
+*.yml text eol=lf

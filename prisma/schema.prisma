@@ -1,0 +1,553 @@
+// COD Marketplace — data model
+//
+// Ownership rules this schema encodes (see ARCHITECTURE.md §5):
+//   - Shopify owns all catalog data. Every Product / ProductVariant /
+//     ProductImage column is written ONLY by the sync worker.
+//   - Orders are created locally first, then submitted to Shopify
+//     asynchronously by a separate worker process.
+//   - Nothing is ever hard-deleted from the catalog; visibility is a flag,
+//     because OrderItem rows reference variants and a catalog change must
+//     never cascade into financial history.
+//
+// Money is ALWAYS Decimal(18,4). No Float, no Int-cents, anywhere.
+//
+// ---------------------------------------------------------------------------
+// CAVEAT — Prisma `upsert` is NOT atomic on MySQL.
+// It may compile to SELECT-then-INSERT/UPDATE rather than
+// `INSERT ... ON DUPLICATE KEY UPDATE`. Two sync page jobs (or a page job and
+// a webhook) racing the same new product will therefore both attempt the
+// INSERT and one will raise P2002. Every catalog upsert must either catch
+// P2002 and retry as an update, or use a raw `INSERT ... ON DUPLICATE KEY
+// UPDATE`. The unique constraints below make the race *safe*; they do not
+// make it *invisible*.
+// ---------------------------------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+// APPLIED IN MIGRATION `20260929053009_init` -- NOT EXPRESSIBLE IN PSL
+//
+// These statements are hand-written at the end of that migration's
+// migration.sql. They are live in the database; this block documents them, it
+// does not queue them up.
+//
+// *** `prisma db pull` CANNOT REPRODUCE ANY OF THIS. *** Prisma has no PSL
+// syntax for a CHECK constraint or a database-level collation, so introspecting
+// the database into a schema silently drops them. If this schema is ever
+// regenerated from the database, re-read this block -- the constraints will
+// still exist in MySQL, but nothing in schema.prisma will hint that they do.
+// The same is why `prisma migrate diff` reports no drift for them: Prisma does
+// not see them at all.
+//
+//   -- Character set. Product titles contain emoji, and the DATABASE default is
+//   -- what a table created outside Prisma inherits.
+//   --
+//   -- utf8mb4_unicode_ci, NOT utf8mb4_0900_ai_ci: every CREATE TABLE Prisma
+//   -- emits ends in `COLLATE utf8mb4_unicode_ci`, and docker-compose.yml sets
+//   -- the server to match. A database default that disagreed with its own
+//   -- tables is the "Illegal mix of collations" trap.
+//   ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+//
+//   -- No per-table CONVERT is needed or applied: Prisma already emits the
+//   -- correct charset and collation on every table.
+//
+//   -- CHECK constraints (MySQL 8.0.16+ enforces these; this project runs 8.4).
+//   -- Verified enforcing: an INSERT violating chk_o_totals and one violating
+//   -- chk_o_amounts_nonneg were both rejected with ERROR 3819.
+//   ALTER TABLE order_items ADD CONSTRAINT chk_oi_qty_positive
+//     CHECK (quantity > 0);
+//   ALTER TABLE order_items ADD CONSTRAINT chk_oi_unit_price_nonneg
+//     CHECK (unitPrice >= 0);
+//   ALTER TABLE order_items ADD CONSTRAINT chk_oi_line_total
+//     CHECK (lineTotal = unitPrice * quantity);
+//   ALTER TABLE orders ADD CONSTRAINT chk_o_totals
+//     CHECK (grandTotal = subtotal + shippingTotal + taxTotal);
+//   ALTER TABLE orders ADD CONSTRAINT chk_o_amounts_nonneg
+//     CHECK (subtotal >= 0 AND shippingTotal >= 0 AND taxTotal >= 0 AND grandTotal >= 0);
+//   ALTER TABLE product_variants ADD CONSTRAINT chk_pv_price_nonneg
+//     CHECK (price >= 0);
+//   ALTER TABLE product_variants ADD CONSTRAINT chk_pv_inventory_sane
+//     CHECK (inventoryQuantity >= -1000000);
+//
+// A future constraint goes in a NEW migration -- never by editing the applied
+// one, which would leave every existing database without it.
+//
+// Invariants that remain APPLICATION-level (not expressible as row-level CHECKs
+// because they span rows or tables, so no database guarantee backs them):
+//   - status = SYNCED          =>  shopifyOrderId IS NOT NULL
+//   - status = DRAFT_CREATED   =>  shopifyDraftOrderId IS NOT NULL
+//   - isActive = false         =>  deactivatedAt IS NOT NULL
+//   - Product.isActive = false =>  all its variants are isActive = false
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+
+  /// Points at a SEPARATE, pre-created database (`marketplace_shadow`).
+  /// Without this, `prisma migrate dev` creates and drops a temporary shadow
+  /// database on the fly, which requires a server-wide CREATE DATABASE
+  /// privilege. Because the shadow database already exists and the dev user
+  /// holds privileges on it, the application user needs NO elevated rights.
+  /// Prisma resets the CONTENTS of this database on every `migrate dev`, so it
+  /// must never point at anything that holds real data.
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+// ===========================================================================
+// Catalog — mirrored from Shopify, read-only to the rest of the application
+// ===========================================================================
+
+/// Mirror of Shopify's product status. Written by the sync worker only.
+enum ProductStatus {
+  ACTIVE
+  ARCHIVED
+  DRAFT
+}
+
+/// Why a product/variant is locally invisible. Null while `isActive` is true.
+enum DeactivationReason {
+  /// Shopify reports status ARCHIVED or DRAFT.
+  SHOPIFY_STATUS
+  /// Absent from a COMPLETED FULL sync run — treated as deleted upstream.
+  /// An INCREMENTAL run must never set this: it sees a filtered slice.
+  MISSING_FROM_SYNC
+  /// Shopify products/delete webhook (bonus scope).
+  SHOPIFY_DELETED
+}
+
+/// Shopify's `inventoryPolicy`: whether to allow purchase past zero stock.
+enum InventoryPolicy {
+  DENY
+  CONTINUE
+}
+
+model Product {
+  id String @id @default(cuid())
+
+  // --- Shopify identity ---------------------------------------------------
+  /// Full GID, e.g. "gid://shopify/Product/123". Natural key for every upsert.
+  shopifyProductId String @unique @db.VarChar(255)
+  /// Shopify handle. The storefront URL segment.
+  handle           String @unique @db.VarChar(255)
+
+  // --- Catalog content ----------------------------------------------------
+  title           String        @db.VarChar(255)
+  descriptionHtml String?       @db.Text
+  vendor          String?       @db.VarChar(255)
+  productType     String?       @db.VarChar(255)
+  status          ProductStatus
+
+  // --- Local visibility ---------------------------------------------------
+  /// Single storefront predicate. Denormalised on purpose: the list query
+  /// filters one indexed column instead of `status = ACTIVE AND deactivatedAt IS NULL`.
+  isActive           Boolean             @default(false)
+  deactivatedAt      DateTime?
+  deactivationReason DeactivationReason?
+
+  publishedAt DateTime?
+
+  // --- Sync bookkeeping ---------------------------------------------------
+  /// Shopify's own updatedAt. The stale-write guard: a write is applied only
+  /// when incoming.updatedAt >= this value, so an in-flight bulk page cannot
+  /// clobber a newer webhook update.
+  shopifyUpdatedAt DateTime
+  /// Stamp, not a relation: no FK to SyncRun, so sync runs can be pruned and
+  /// the hot upsert path takes no FK lock. May reference a deleted run.
+  lastSyncRunId    String?  @db.VarChar(36)
+  syncedAt         DateTime @updatedAt
+
+  // --- Variant pagination state -------------------------------------------
+  /// Cursor into this product's variant connection while a `variant-sync`
+  /// chain is walking pages 2+. Null when no chain is in flight.
+  variantSyncCursor   String? @db.VarChar(1024)
+  /// False while a variant chain is in flight or after one failed. The stored
+  /// variant set is then a TRUNCATED view and the storefront must not present
+  /// the product as complete.
+  variantSyncComplete Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  variants ProductVariant[]
+  images   ProductImage[]
+
+  /// Storefront list: WHERE isActive = 1 ORDER BY publishedAt DESC, id DESC.
+  /// Composite so keyset pagination stays index-only.
+  @@index([isActive, publishedAt, id])
+  /// Full-run reconciliation: find rows this run did not touch.
+  @@index([lastSyncRunId])
+  /// Operator view: products stuck with an incomplete variant chain.
+  @@index([variantSyncComplete])
+  @@map("products")
+}
+
+model ProductVariant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Full GID, e.g. "gid://shopify/ProductVariant/456". Upsertable
+  /// independently of its product — that is what lets a `variant-sync` job
+  /// write page 2+ of a >100-variant product long after the page job that
+  /// wrote the product itself.
+  shopifyVariantId String  @unique @db.VarChar(255)
+  sku              String? @db.VarChar(255)
+  title            String  @db.VarChar(255)
+  position         Int     @default(0)
+
+  // --- Money (Shopify-owned) ----------------------------------------------
+  price          Decimal  @db.Decimal(18, 4)
+  compareAtPrice Decimal? @db.Decimal(18, 4)
+  /// ISO-4217. Single-currency store, but never hard-coded in app code.
+  currencyCode   String   @db.Char(3)
+
+  // --- Inventory (Shopify-owned, read-only to checkout) -------------------
+  /// Snapshot from the last sync. Stale by up to one sync interval.
+  /// Checkout re-reads this server-side and rejects insufficient stock; it
+  /// does NOT reserve. See ARCHITECTURE.md §4.1 for the known oversell gap.
+  inventoryQuantity Int             @default(0)
+  inventoryTracked  Boolean         @default(true)
+  inventoryPolicy   InventoryPolicy @default(DENY)
+
+  // --- Local visibility ---------------------------------------------------
+  isActive           Boolean             @default(false)
+  deactivatedAt      DateTime?
+  deactivationReason DeactivationReason?
+
+  // --- Sync bookkeeping ---------------------------------------------------
+  shopifyUpdatedAt DateTime
+  lastSyncRunId    String?  @db.VarChar(36)
+  syncedAt         DateTime @updatedAt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([productId, position])
+  @@index([lastSyncRunId])
+  @@map("product_variants")
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  shopifyImageId String  @unique @db.VarChar(255)
+  url            String  @db.VarChar(2048)
+  altText        String? @db.VarChar(500)
+  position       Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Images are reconciled per product (upsert by shopifyImageId, then delete
+  /// this product's images not present in the payload), so no sync stamp is
+  /// needed here.
+  @@index([productId, position])
+  @@map("product_images")
+}
+
+// ===========================================================================
+// Sync bookkeeping
+// ===========================================================================
+
+enum SyncMode {
+  /// Walks the whole catalog. Only a COMPLETED FULL run may deactivate products.
+  FULL
+  /// Walks products with updated_at >= watermark. Never deactivates.
+  INCREMENTAL
+}
+
+enum SyncRunStatus {
+  RUNNING
+  COMPLETED
+  /// Finished, but at least one page or variant chain failed. Gaps close on
+  /// the next FULL run.
+  PARTIAL
+  FAILED
+}
+
+enum SyncTrigger {
+  SCHEDULE
+  NIGHTLY
+  MANUAL
+  WEBHOOK
+}
+
+model SyncRun {
+  id     String        @id @default(cuid())
+  mode   SyncMode
+  status SyncRunStatus @default(RUNNING)
+
+  /// Set to the literal 'ACTIVE' while RUNNING, NULL once finished. MySQL
+  /// allows many NULLs in a UNIQUE index but only one 'ACTIVE', which gives a
+  /// single-active-run guarantee without partial indexes (MySQL has none).
+  /// NOT self-releasing — see `heartbeatAt`.
+  activeLock String? @unique @db.VarChar(16)
+
+  /// Refreshed by every page job. A RUNNING row whose heartbeat is older than
+  /// the reclaim threshold belonged to a dead worker: the reclaim sweep marks
+  /// it FAILED and NULLs `activeLock`. Without this a single crash would block
+  /// every future sync permanently.
+  heartbeatAt DateTime @default(now())
+
+  /// Lower bound for Shopify's `updated_at:>=` filter, with a negative overlap
+  /// applied. Null for FULL runs.
+  watermarkFrom DateTime?
+
+  // --- Progress / observability -------------------------------------------
+  pagesProcessed      Int         @default(0)
+  productsUpserted    Int         @default(0)
+  variantsUpserted    Int         @default(0)
+  productsDeactivated Int         @default(0)
+  lastCursor          String?     @db.VarChar(1024)
+  lastError           String?     @db.Text
+  triggeredBy         SyncTrigger
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  /// The reclaim sweep: RUNNING rows with a stale heartbeat.
+  @@index([status, heartbeatAt])
+  @@index([status, startedAt])
+  @@index([mode, startedAt])
+  @@map("sync_runs")
+}
+
+// ===========================================================================
+// Orders
+// ===========================================================================
+
+enum OrderStatus {
+  /// Committed locally, not yet sent to Shopify. The sweeper's re-enqueue set.
+  PENDING_SYNC
+  /// Claimed by a worker. A lease, not a resting state — see `claimedAt`.
+  SYNCING
+  /// Durable checkpoint: the Shopify draft order exists and its ID is stored.
+  /// A retry resumes at draftOrderComplete and never re-creates the draft.
+  DRAFT_CREATED
+  /// draftOrderComplete succeeded; shopifyOrderId is set. Terminal success.
+  SYNCED
+  /// Terminal-data error or exhausted retries. Operator-retryable from AdminLTE.
+  FAILED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  COD
+}
+
+model Order {
+  id String @id @default(cuid())
+
+  // --- Identity -----------------------------------------------------------
+  /// Human-facing reference, e.g. "MP-7K2QH4". Spoken aloud during COD
+  /// support calls, therefore deliberately short and guessable — which is
+  /// exactly why it is never used to address the confirmation page.
+  reference   String @unique @db.VarChar(32)
+  /// Unguessable token for the confirmation URL. Prevents order enumeration.
+  publicToken String @unique @db.VarChar(64)
+
+  // --- Idempotency --------------------------------------------------------
+  /// Browser-supplied, one per checkout attempt.
+  idempotencyKey     String @unique @db.VarChar(64)
+  /// SHA-256 of the normalised request (cart lines + contact details). A
+  /// client-supplied key alone is NOT safe to dereference: a collision would
+  /// return another customer's order, PII included. On conflict the existing
+  /// order is returned ONLY when this fingerprint matches; otherwise 409.
+  requestFingerprint String @db.Char(64)
+  /// Server-generated. Sent to Shopify as tag `cod-<submissionKey>` and as a
+  /// custom attribute, so a retry can discover a draft created by a request
+  /// whose response was lost.
+  submissionKey      String @unique @db.VarChar(64)
+
+  status        OrderStatus   @default(PENDING_SYNC)
+  paymentMethod PaymentMethod @default(COD)
+
+  // --- Money (all Decimal, never Float) -----------------------------------
+  currencyCode  String  @db.Char(3)
+  subtotal      Decimal @db.Decimal(18, 4)
+  /// Fixed at 0 for this exercise — the column exists so enabling shipping
+  /// later is an additive change, not a breaking migration.
+  shippingTotal Decimal @default(0) @db.Decimal(18, 4)
+  /// Fixed at 0 for this exercise.
+  taxTotal      Decimal @default(0) @db.Decimal(18, 4)
+  /// subtotal + shippingTotal + taxTotal. The authoritative amount the
+  /// customer was shown and the courier collects.
+  grandTotal    Decimal @db.Decimal(18, 4)
+
+  // --- Customer + delivery address — ALL PII ------------------------------
+  // Never logged, never placed in a job payload, never sent to a third party.
+  // Retention policy is documented but NOT YET IMPLEMENTED (ARCHITECTURE.md §8).
+  customerName  String  @db.VarChar(255)
+  customerPhone String  @db.VarChar(32)
+  customerEmail String? @db.VarChar(320)
+  addressLine1  String  @db.VarChar(255)
+  addressLine2  String? @db.VarChar(255)
+  city          String  @db.VarChar(128)
+  province      String? @db.VarChar(128)
+  postalCode    String? @db.VarChar(32)
+  countryCode   String  @db.Char(2)
+  customerNote  String? @db.Text
+
+  // --- Shopify linkage ----------------------------------------------------
+  /// Persisted IMMEDIATELY after draftOrderCreate, before completion is
+  /// attempted. Unique: two orders can never bind the same draft.
+  shopifyDraftOrderId String? @unique @db.VarChar(255)
+  /// Persisted after draftOrderComplete. Its presence means "done, never
+  /// resubmit" and is the final duplicate backstop.
+  shopifyOrderId      String? @unique @db.VarChar(255)
+  shopifyOrderName    String? @db.VarChar(64)
+
+  // --- Submission bookkeeping ---------------------------------------------
+  attempt       Int       @default(0)
+  /// Lease timestamp. A row in SYNCING whose claimedAt is older than the lease
+  /// belonged to a dead worker and is reclaimable. Without this, a crash
+  /// strands the order forever.
+  claimedAt     DateTime?
+  submittedAt   DateTime?
+  failureReason String?   @db.VarChar(128)
+  lastError     String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items OrderItem[]
+
+  /// Admin order list, and the PENDING_SYNC re-enqueue sweep. The Order row
+  /// IS the outbox: there is no separate outbox table.
+  @@index([status, createdAt])
+  /// The expired-lease sweep: SYNCING rows with a stale claim.
+  @@index([status, claimedAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Nullable FK with SetNull: a catalog change must never cascade into
+  /// financial history. In practice variants are never deleted (soft-delete
+  /// only), so this is defence in depth.
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  /// Snapshot of the GIDs so submission never depends on the local FK
+  /// still resolving.
+  shopifyVariantId String @db.VarChar(255)
+  shopifyProductId String @db.VarChar(255)
+
+  // --- Checkout-time snapshots (write-once; never re-read from the catalog)
+  // unitPrice is read from ProductVariant.price on the server during checkout.
+  // The client sends { variantId, quantity } ONLY — there is no price field in
+  // the request schema, so a browser-supplied price is not rejected, it is
+  // unrepresentable.
+  productTitle String  @db.VarChar(255)
+  variantTitle String  @db.VarChar(255)
+  sku          String? @db.VarChar(255)
+  unitPrice    Decimal @db.Decimal(18, 4)
+  quantity     Int
+  /// unitPrice * quantity, rounded once to currency precision. Currency is
+  /// carried by the parent order — single currency per order, always.
+  lineTotal    Decimal @db.Decimal(18, 4)
+
+  /// No updatedAt: rows are immutable once written.
+  createdAt DateTime @default(now())
+
+  /// One line per variant per order — forces quantity merging at checkout.
+  @@unique([orderId, shopifyVariantId])
+  @@index([variantId])
+  @@map("order_items")
+}
+
+// ===========================================================================
+// Job history — durable, unlike BullMQ's Redis-resident retention
+// ===========================================================================
+
+enum JobStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+}
+
+enum JobEntityType {
+  ORDER
+  PRODUCT
+  SYNC_RUN
+}
+
+/// One row per ATTEMPT, not per job. A row still STARTED with an old
+/// `startedAt` is the crashed-worker signal.
+///
+/// Must never store job payloads or serialised error objects: order errors
+/// carry customer addresses. `errorMessage` is a sanitised string.
+///
+/// RETENTION: none. This table is append-only and grows without bound — one
+/// row per job ATTEMPT, so it grows faster than any other table here. No
+/// pruning is implemented in this exercise; scheduled deletion by age (or
+/// partitioning on `startedAt`) is a production follow-up.
+model JobLog {
+  id String @id @default(cuid())
+
+  queueName String @db.VarChar(64)
+  jobName   String @db.VarChar(64)
+  /// BullMQ's job id. Not unique on its own — retries share it.
+  bullJobId String @db.VarChar(128)
+  attempt   Int
+
+  entityType JobEntityType?
+  entityId   String?        @db.VarChar(64)
+
+  status       JobStatus @default(STARTED)
+  durationMs   Int?
+  errorClass   String?   @db.VarChar(128)
+  errorMessage String?   @db.Text
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  /// Multiple attempts per job, and re-logging one attempt is idempotent.
+  @@unique([bullJobId, attempt])
+  /// "Show me everything that happened to order X."
+  @@index([entityType, entityId, startedAt])
+  /// Queue health dashboard.
+  @@index([queueName, status, startedAt])
+  /// Global failure feed.
+  @@index([status, startedAt])
+  @@map("job_logs")
+}
+
+// ===========================================================================
+// Webhook receipts — BONUS scope. Deliberately minimal: dedupe only.
+//
+// NOTHING IN THE CORE FLOW READS OR WRITES THIS TABLE. Product freshness is
+// guaranteed solely by the 10–15 minute incremental sync; webhooks can only
+// ever make it fresher. If webhooks are never built, every core feature still
+// works and this table simply stays empty.
+//
+// RETENTION: none implemented — see JobLog. Production follow-up.
+// ===========================================================================
+
+model WebhookEvent {
+  id String @id @default(cuid())
+
+  /// Shopify's X-Shopify-Webhook-Id. Unique, so a redelivered webhook is
+  /// recognised and skipped rather than reprocessed.
+  shopifyWebhookId String @unique @db.VarChar(255)
+  topic            String @db.VarChar(128)
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  /// The raw payload body is deliberately NOT stored: order webhooks carry
+  /// full customer PII.
+  @@index([topic, receivedAt])
+  @@map("webhook_events")
+}
