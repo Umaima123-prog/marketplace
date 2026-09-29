@@ -10,16 +10,30 @@
  */
 import { env } from "@/src/lib/env";
 import type { Logger } from "@/src/lib/logger";
-import { JOB, PRODUCT_SYNC_JOB_OPTIONS, getProductSyncQueue, type ProductSyncPayload } from "@/src/lib/queues";
+import {
+  JOB,
+  ORDER_RECOVERY_JOB_OPTIONS,
+  PRODUCT_SYNC_JOB_OPTIONS,
+  getOrderRecoveryQueue,
+  getProductSyncQueue,
+  type ProductSyncPayload,
+} from "@/src/lib/queues";
 
 const INCREMENTAL_SCHEDULER_ID = "product-sync-incremental";
 const NIGHTLY_SCHEDULER_ID = "product-sync-nightly";
+const ORDER_RECOVERY_SCHEDULER_ID = "order-recovery";
 
 export async function registerRepeatableJobs(log: Logger): Promise<void> {
+  // Two independent decisions, deliberately not one flag. See src/lib/env.ts.
+  await registerSyncSchedulers(log);
+  await registerOrderRecoveryScheduler(log);
+}
+
+async function registerSyncSchedulers(log: Logger): Promise<void> {
   if (!env.syncSchedulersEnabled) {
     log.warn(
-      { event: "schedulers_disabled" },
-      "SYNC_SCHEDULERS_ENABLED=false: this worker processes only what is explicitly enqueued",
+      { event: "sync_schedulers_disabled" },
+      "SYNC_SCHEDULERS_ENABLED=false: this worker runs no scheduled catalog sync",
     );
     return;
   }
@@ -58,8 +72,48 @@ export async function registerRepeatableJobs(log: Logger): Promise<void> {
     {
       incrementalEveryMinutes: env.productSyncIntervalMinutes,
       nightlyCron: "0 3 * * *",
-      event: "schedulers_registered",
+      event: "sync_schedulers_registered",
     },
     "repeatable sync jobs registered",
+  );
+}
+
+/**
+ * The outbox drain.
+ *
+ * Registered independently of the sync schedules, because an order whose enqueue
+ * was lost is a customer waiting for a parcel that was never ordered -- not log
+ * noise to be silenced during a controlled run.
+ */
+async function registerOrderRecoveryScheduler(log: Logger): Promise<void> {
+  if (!env.orderRecoveryEnabled) {
+    log.warn(
+      { event: "order_recovery_disabled" },
+      "ORDER_RECOVERY_ENABLED=false: orders whose enqueue was lost will NOT be recovered automatically",
+    );
+    return;
+  }
+
+  await getOrderRecoveryQueue().upsertJobScheduler(
+    ORDER_RECOVERY_SCHEDULER_ID,
+    { every: env.orderRecoveryIntervalMinutes * 60 * 1000 },
+    {
+      name: JOB.RECOVER_ORDERS,
+      data: {},
+      opts: {
+        attempts: ORDER_RECOVERY_JOB_OPTIONS.attempts,
+        backoff: ORDER_RECOVERY_JOB_OPTIONS.backoff,
+      },
+    },
+  );
+
+  log.info(
+    {
+      orderRecoveryEveryMinutes: env.orderRecoveryIntervalMinutes,
+      graceSeconds: env.orderRecoveryGraceSeconds,
+      leaseSeconds: env.orderClaimLeaseSeconds,
+      event: "order_recovery_scheduler_registered",
+    },
+    "order recovery sweep registered",
   );
 }

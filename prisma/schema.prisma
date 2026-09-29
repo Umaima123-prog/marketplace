@@ -500,6 +500,20 @@ model JobLog {
   jobName   String @db.VarChar(64)
   /// BullMQ's job id. Not unique on its own — retries share it.
   bullJobId String @db.VarChar(128)
+  /// Which INSTANCE of that job id this attempt belongs to: BullMQ's
+  /// `job.timestamp` (enqueue time in epoch millis), as a string.
+  ///
+  /// Required because submit-order uses a FIXED job id per order, reused every
+  /// time the order is re-enqueued — so a replacement job restarts at attempt 1
+  /// and collides with the earlier job's attempt-1 row. Observed live: the
+  /// winning attempt of the first real COD order could not be recorded at all,
+  /// because `(bullJobId, attempt)` was already taken by a job that had since
+  /// been replaced.
+  ///
+  /// Defaults to "" so rows written before this column existed keep the old
+  /// `(bullJobId, attempt)` uniqueness among themselves rather than becoming
+  /// duplicable.
+  jobInstance String @default("") @db.VarChar(32)
   attempt   Int
 
   entityType JobEntityType?
@@ -509,12 +523,22 @@ model JobLog {
   durationMs   Int?
   errorClass   String?   @db.VarChar(128)
   errorMessage String?   @db.Text
+  /// Whether the failure was classified as retryable. Recorded rather than
+  /// re-derived, because the taxonomy can change and history must not.
+  retryable    Boolean?
+  /// The entity's own lifecycle status when the attempt began and when it
+  /// ended, e.g. PENDING_SYNC -> DRAFT_CREATED. `status` above is the JOB's
+  /// outcome; these are the ORDER's, and reading a submission's history without
+  /// them means joining every attempt back to a row that has since moved on.
+  startStatus  String?   @db.VarChar(32)
+  endStatus    String?   @db.VarChar(32)
 
   startedAt  DateTime  @default(now())
   finishedAt DateTime?
 
-  /// Multiple attempts per job, and re-logging one attempt is idempotent.
-  @@unique([bullJobId, attempt])
+  /// One row per attempt per job INSTANCE, so re-logging an attempt stays
+  /// idempotent while a replacement job's attempt 1 is still recordable.
+  @@unique([bullJobId, jobInstance, attempt])
   /// "Show me everything that happened to order X."
   @@index([entityType, entityId, startedAt])
   /// Queue health dashboard.

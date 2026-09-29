@@ -92,6 +92,7 @@ export async function processProductSyncPage(job: Job<ProductSyncPagePayload>): 
       queueName: QUEUE.PRODUCT_SYNC_PAGE,
       jobName: JOB.SYNC_PRODUCTS_PAGE,
       bullJobId: String(job.id),
+      jobInstance: String(job.timestamp),
       attempt,
       maxAttempts: job.opts.attempts ?? 1,
       entityType: "SYNC_RUN",

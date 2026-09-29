@@ -526,9 +526,36 @@ submit-order processor
  ── Phase 2: complete it ──────────────────────────────────────────────────
  5. read draftOrder(id: shopifyDraftOrderId)
       if draftOrder.order.id is present  →  already completed, take it  (lost-response recovery)
- 6. else draftOrderComplete(id: shopifyDraftOrderId, paymentPending: true)
+ 6. else draftOrderComplete(id: shopifyDraftOrderId, paymentPending: <mode>)   ← see below
  7. persist shopifyOrderId + shopifyOrderName, status = SYNCED, submittedAt = now
 ```
+
+**How "unpaid" is expressed, and why it is configuration.** This section originally specified
+`draftOrderComplete(id, paymentPending: true)`. On 2026-07 that argument is DEPRECATED, with
+the stated replacement: *"Create a draft with payment terms rather than marking the draft as
+pending."* Payment terms were therefore implemented — and then the first live order revealed
+that `draftOrderCreate` refuses them for this app:
+
+> `The user must have access to set payment terms.`
+
+`draftOrderCalculate` **accepts** the same input, so validating the input shape could not have
+caught this; only the real mutation did. Both mechanisms are now implemented and selected by
+`SHOPIFY_COD_PAYMENT_MODE`:
+
+| Mode | Mechanism | State |
+|---|---|---|
+| `payment_pending` (**default**) | no terms on the draft; `draftOrderComplete(paymentPending: true)` | **In use. Verified live** — the resulting order is `PENDING` with the full amount outstanding. |
+| `payment_terms` | `paymentTerms` on the draft; no `paymentPending` on completion | Blocked by the permission above. Non-deprecated, and the intended destination. |
+
+**The default is a deprecated argument, and that is a debt with a deadline.** `paymentPending`
+is present and functional on the pinned version, needs no extra permission, and means exactly
+"the payment is pending" — but Shopify has already named its replacement, so a future API
+version will remove it. **Migration: grant the app permission to set payment terms, then set
+`SHOPIFY_COD_PAYMENT_MODE=payment_terms`.** That is the whole change; the code path exists and
+is tested. Tracked as gap D10.
+
+Two other field names in the original plan were also wrong, for the same reason — they were
+written from memory rather than from the schema. See 4.2b.
 
 The **claim is a lease, not a latch.** Including expired `SYNCING` rows in the claim set is what
 makes a crashed worker recoverable; without it an order stranded in `SYNCING` is unreachable by any
@@ -540,8 +567,275 @@ querying by tag. And **a stranded draft is garbage, not a duplicate order**: dra
 decrement inventory, and are swept by reconciliation. The expensive failure mode lives in the cheap
 phase.
 
-Line prices are sent **explicitly** from local snapshots. The exact field names for explicit pricing,
-`taxExempt` and the zero shipping line must be confirmed against the pinned API version.
+Line prices are sent **explicitly** from local snapshots. The field names for explicit pricing,
+`taxExempt` and the zero shipping line were confirmed against the pinned API version by
+introspection, and the whole input was then validated with `draftOrderCalculate` — which prices a
+draft without persisting one. See 4.2b.
+
+### 4.2b Phase 5 as implemented (the submit-order worker)
+
+The local order path (Phase 4) ended with a `PENDING_SYNC` row and a job on the queue that
+nothing consumed. This phase consumes it.
+
+| Concern | File |
+|---|---|
+| Lifecycle transitions, claim/lease, recovery queries | `src/lib/orders/order-repo.ts` |
+| The two-phase submission | `src/lib/orders/submit-order.ts` |
+| Order rows -> DraftOrderInput (pure) | `src/lib/orders/draft-order-input.ts` |
+| Real Shopify calls; userErrors -> permanent | `src/lib/orders/shopify-port.ts` |
+| Mutations and queries | `src/lib/shopify/order-mutations.ts` |
+| COD payment terms resolution | `src/lib/orders/payment-terms.ts` |
+| The outbox drain | `src/lib/orders/recovery.ts` |
+| Processors | `src/worker/processors/submit-order.ts`, `order-recovery.ts` |
+
+**Lifecycle.** `PENDING_SYNC -> SYNCING -> DRAFT_CREATED -> SYNCED`, with `FAILED` reachable
+from either working state. Every transition is a CONDITIONAL `updateMany` carrying the
+expected state in its WHERE clause, never a read followed by a write. That is the entire
+mechanism by which two workers cannot submit one order twice: both may read `PENDING_SYNC`,
+but only one `UPDATE ... WHERE status = 'PENDING_SYNC'` affects a row, and the loser sees
+`count: 0` and stands down. Five simultaneous claimers producing exactly one claim is an
+integration test against real MySQL, not an assumption about InnoDB.
+
+**The claim is a lease.** `claimedAt` plus `ORDER_CLAIM_LEASE_SECONDS` (default 300). A
+`SYNCING` row whose claim is older than the lease belonged to a worker that died and is
+reclaimable — without that, one crash strands an order forever. The lease must exceed a
+worst-case submission (two Shopify round trips plus internal retries); 300s against BullMQ's
+120s `lockDuration` leaves real headroom. `attempt` counts CLAIMS rather than BullMQ
+attempts, deliberately: it survives a crash, which is what "how many times has this been
+tried" should mean.
+
+**Idempotency, four ways, none of them BullMQ.** The queue's job id is layer zero; every
+actual guarantee is a MySQL conditional write or a Shopify lookup:
+
+| Situation | What happens | Why not a duplicate |
+|---|---|---|
+| `SYNCED` with `shopifyOrderId` | claim refused, job returns success | nothing left to do; a claim would be the first step toward a second order |
+| `DRAFT_CREATED` with a stored draft id | resume at completion | the stored id is trusted with no round trip: this system wrote it |
+| no draft id, but a draft exists | tag pre-flight `tag:"cod-<submissionKey>"` finds and adopts it | covers the window where `draftOrderCreate` succeeded and its response was lost |
+| draft already completed | `draftOrder(id:)` lookup adopts its order | covers a lost `draftOrderComplete` response |
+
+The draft id is persisted IMMEDIATELY after creation, before completion is attempted — the
+most important write in the phase. An integration test asserts it from *inside* a failing
+completion: at the moment completion throws, the row already says `DRAFT_CREATED` with the
+id.
+
+**Error classification.** Retryable: transport failures, 429/THROTTLED, 5xx, and anything
+unrecognised (a MySQL deadlock must not fail an order). Permanent: mutation `userErrors`,
+GraphQL-level errors, auth failures, and four self-diagnosed cases
+(`duplicate_submission_key`, `draft_not_found`, `complete_without_order`,
+`checkpoint_lost_claim`). A retryable failure RELEASES the claim before rethrowing — back to
+`DRAFT_CREATED` if a draft exists, `PENDING_SYNC` if not — so the retry can claim immediately
+instead of waiting out the lease. A permanent failure, or a retryable one on the last
+attempt, marks `FAILED` and **keeps `shopifyDraftOrderId`**: the draft may exist, and an
+operator retry must resume it rather than create a second one.
+
+Mutations are called with `maxAttempts: 1`, overriding the client's internal retry. That
+retry is right for a read and wrong for a mutation that creates something: an inline retry
+after an ambiguous failure risks two drafts. Retrying is BullMQ's job, and by then the tag
+pre-flight exists to notice the first draft.
+
+**Job history.** One `JobLog` row per attempt, carrying queue, job name, BullMQ id, attempt,
+order id, duration, the retryable verdict, a safe error — and `startStatus` -> `endStatus`,
+two columns added this phase. Without them, reading a submission's history means joining
+every attempt back to a row that has since moved on; with them, `PENDING_SYNC ->
+DRAFT_CREATED` is on the row. `retryable` is recorded rather than re-derived, because the
+taxonomy can change and history must not.
+
+**What the API actually wanted.** Three field names in the original plan were wrong, all
+found by introspecting 2026-07 rather than at runtime:
+
+- `draftOrderComplete(paymentPending:)` is deprecated -> COD is expressed as
+  `paymentTerms` on the draft. The template is discovered per shop (ids are per shop) with
+  `FULFILLMENT` ("Due on fulfillment" — pay when it arrives) preferred over `RECEIPT`, and
+  NET/FIXED never used: either would tell the merchant the money is due in 30 days.
+- a variant line item's explicit price is `priceOverride: MoneyInput`.
+  `originalUnitPrice` and `originalUnitPriceWithCurrency` are documented as *"ignored when
+  `variantId` is provided"* — they are for custom line items, so using one would have
+  silently handed Shopify the current catalog price instead of the price the customer was
+  quoted.
+- `ShippingLineInput.price` is deprecated in favour of `priceWithCurrency`.
+
+The complete input was then validated against the live API with `draftOrderCalculate`, which
+prices a draft without persisting one: zero `userErrors` for the guest-COD shape, including
+`paymentTerms` with no customer attached.
+
+**Access scopes.** The app version must declare four:
+
+| Scope | Needed for |
+|---|---|
+| `read_products` | catalog sync |
+| `read_inventory` | `inventoryQuantity` / `tracked`, for the checkout stock check |
+| `write_draft_orders` | `draftOrderCreate`, `draftOrderComplete` |
+| `read_draft_orders` | the submission's two recovery lookups |
+
+`read_draft_orders` is genuinely required — without it the completion guard
+(`draftOrder(id:)`) and the lost-response pre-flight
+(`draftOrders(query: 'tag:"cod-<key>"')`) both fail, which would remove the protection
+against creating a second draft. In practice Shopify grants it implicitly alongside
+`write_draft_orders`: on the development store `currentAppInstallation.accessScopes` returns
+all four, and both lookups were executed against the live API and allowed. It is documented
+explicitly regardless, because "implied by another scope" is not something a reviewer should
+have to infer, and an app version declaring the write scope alone would look under-specified.
+
+**Protected customer data.** A COD parcel cannot be delivered without a name, a phone number
+and an address, so `draftOrderCreate` sends all four of Shopify's **Level 2** protected
+customer fields:
+
+| Field sent | Where it goes |
+|---|---|
+| name | `shippingAddress.firstName` / `lastName`, split from `Order.customerName` |
+| email | `email` — omitted entirely when the customer gave none |
+| phone | `phone` and `shippingAddress.phone` |
+| address | `shippingAddress.address1`, `address2?`, `city`, `zip?`, `countryCode` |
+
+Level 1 is protected customer data excluding those four; Level 2 includes them. Shopify
+documents Level 2 as *always available* to a custom app, with no review required on a
+development store.
+
+**Before** the app was reinstalled through its Custom distribution link, it was not approved:
+`draftOrderCalculate` refused to return the `CalculatedDraftOrder` object at all (*"This app
+is not approved to access the CalculatedDraftOrder object"*), at the OBJECT level rather than
+the field level — it fired even for a selection containing no customer field. **After** the
+reinstall the same request is allowed and the object is returned. That gate is closed.
+
+These fields were never removable to get past the requirement, and were not removed. An order
+with no address is not a deliverable order, and a COD system that drops the phone number
+produces parcels no courier can complete.
+
+Every selection in `order-mutations.ts` still asks for no customer field back — only `id`,
+`name`, `status` and the nested `order { id name }` — so the read side needs no Level 2 access
+regardless.
+
+#### Live validation on API 2026-07 (nothing persisted)
+
+`draftOrderCalculate` prices a draft without creating one, so the exact input the shipped
+mapper produces was validated against the live store. Three variants, guest COD, real variant
+id, synthetic customer data:
+
+| Input | userErrors | `CalculatedDraftOrder` | amount due now | amount due later |
+|---|---|---|---|---|
+| full COD input + `paymentTerms` (Due on fulfillment) | **none** | returned | **0.0** | **1899.9** |
+| same input, no `paymentTerms` | none | returned | 1899.9 | 0.0 |
+| full COD input + `paymentTerms` (Due on receipt) | none | returned | **0.0** | **1899.9** |
+
+The middle row is the one that justifies the design: **without** payment terms Shopify treats
+the whole amount as due immediately, and **with** them it is due later and nothing is due now.
+That is unpaid-on-delivery semantics, evidenced rather than assumed — the strongest confirmation
+obtainable without completing a real draft, and it narrows D1 considerably without closing it.
+
+The rest of the response confirms the other three decisions: `subtotal` 1899.9 = 949.95 x 2
+exactly, `totalShippingPriceSet` 0.0, `totalTaxSet` 0.0 with **zero** tax lines (so `taxExempt`
+took effect), and `allVariantPricesOverridden: true` (so `priceOverride` took effect and the
+snapshot price, not the catalog price, is what Shopify priced).
+
+Nothing was persisted, verified by searching for the probe's submission tag afterwards: 0
+drafts with that tag, 0 drafts tagged `COD` at all, and the 10 draft orders on the store all
+predate the validation by four days.
+
+**A bug this caught.** The first run returned one `userErrors` entry: *"Title Tag exceeds the
+maximum length of 40 characters"* on `tags.1`. The submission tag was `cod-` + the
+`submissionKey`, and a 36-character `randomUUID()` makes that **exactly 40** — sitting on
+Shopify's limit with zero margin. Any later change (a longer prefix, a different key
+generator, or any key nearer the `VARCHAR(64)` column width) would have produced an over-long
+tag, which Shopify returns as a `userErrors` entry, which this project classifies as
+PERMANENT — so **every order would have failed immediately and unretryably**, with the
+lost-response recovery tag it depends on never being written. `submissionTag` now strips the
+key's separators (a UUID becomes 32 hex characters) and truncates to the remaining budget, so
+the worst case a `VARCHAR(64)` key can produce is exactly 40. Unit tests assert the bound for
+a real key and for a 64-character one, and the writer and the tag search both derive the tag
+from the same function so they cannot drift.
+
+**Recovery.** The Order row IS the outbox, and this is what makes that true rather than
+aspirational. A repeatable `order-recovery` job (default every 5 minutes) re-enqueues three
+populations with `replaceExisting: true`:
+
+- `PENDING_SYNC` older than `ORDER_RECOVERY_GRACE_SECONDS` — the checkout enqueue failed, or
+  Redis was flushed;
+- `DRAFT_CREATED` older than the grace period — the process died between the two phases;
+- `SYNCING` past the lease — the worker holding it died.
+
+`replaceExisting` is the subtle part: a fixed job id deduplicates against retained COMPLETED
+and FAILED jobs too, so without it the sweep would find an exhausted order every five
+minutes, enqueue nothing, and report success. The sweep never throws — a failure to repair
+must not take the worker down — and it is gated by its OWN flag,
+`ORDER_RECOVERY_ENABLED`, not by `SYNC_SCHEDULERS_ENABLED`. Sharing that flag would mean
+silencing scheduled catalog sync for a controlled run also silently stops orders being
+recovered, which are not the same decision.
+
+**Concurrency 1**, as specified. The claim already makes a second consumer safe; concurrency
+1 additionally keeps submission roughly FIFO, so the customer who checked out first is sent
+first. It caps order throughput at one submission at a time (two Shopify round trips each);
+raising it needs the cross-process cost limiter first (gap S2).
+
+**PII.** A submission logs `orderId`, `attempt`, `startStatus`, `endStatus`, `itemCount`,
+`durationMs` and safe Shopify error fields. Never the address, phone, email or totals. The
+customer's data leaves this system in exactly one place — `buildDraftOrderInput` — and
+`failureReason`/`lastError` carry Shopify's own refusal text, never the input that caused it.
+
+#### 4.2d Verified live, end to end
+
+One controlled order was submitted to the development store. Before: 0 local orders, 0 Shopify
+orders, 0 drafts tagged `COD`. After: exactly one of each.
+
+| Stage | Result |
+|---|---|
+| checkout → local order | `PENDING_SYNC`, one order, one item |
+| BullMQ → worker | claimed, `startStatus: PENDING_SYNC` |
+| `draftOrderCreate` | one draft, id persisted immediately (`paymentTerms: absent`) |
+| local checkpoint | `DRAFT_CREATED` |
+| `draftOrderComplete` | one order, `#1001` |
+| local terminal state | `SYNCED`, lease released, `submittedAt` set, `failureReason` null |
+| Shopify financial status | `displayFinancialStatus: PENDING`, `fullyPaid: false`, outstanding = full total |
+| totals | local `grandTotal` = Shopify `totalPrice`, to the cent |
+| duplicates | 1 draft (status `COMPLETED`, its `order` matching the stored id), 1 Shopify order, 1 job id |
+| PII in logs | 4 log files scanned: no name, phone, email, address, city, postcode, public token or idempotency key; no token, client secret or database password |
+
+That closes D1. The two-phase submission, the checkpoint, the claim, the totals and the COD
+financial status are now confirmed against the real API rather than against a fake port.
+
+**Two defects the live run exposed, neither of which any test had caught:**
+
+1. **BullMQ passes `(job, token)`.** The processor's second parameter was an injected
+   dependency with a default value, so BullMQ's token string was passed in its place:
+   `shopify.findDraftOrdersByQuery is not a function`. It failed before any Shopify call and
+   the order was released back to `PENDING_SYNC`, so nothing was orphaned — but every
+   submission would have failed. Fixed at the root: `build()` in `src/worker/index.ts` now
+   wraps every processor as `(job) => processor(job)`, which removes the whole class of bug,
+   and `resolveShopifyPort` validates what it is given and falls back to the real client, so a
+   mis-registration degrades instead of throwing mid-submission.
+
+2. **`replaceExisting` failed silently.** The removal of the retained terminal job was wrapped
+   in `.catch(() => undefined)`, and success was inferred from `job.id === jobId` — which is
+   true whether `add` created a job or merely returned the existing one. On a cold connection
+   the removal failed, the add was deduplicated against the completed job, and the retry
+   reported success while queueing nothing. Two BullMQ behaviours made the old code
+   unfixable as written: `add` returns the pre-existing job, and `remove` reports a count even
+   when there was nothing to remove. `enqueueSubmitOrder` now reads the job before deciding,
+   verifies the removal by re-reading, and surfaces `removeError`; the recovery sweep counts a
+   failed replacement as a failure rather than as work done. Covered by
+   `tests/integration/submit-order-queue.integration.test.ts` against real Redis — the
+   behaviour is BullMQ's, so it is tested against BullMQ.
+
+A third, smaller finding: `JobLog` lost the successful attempt's row, because a submit job id
+is fixed per order and its replacement restarted at attempt 1, colliding with the earlier
+attempt-1 row. Recorded as D11 and since fixed with a `jobInstance` discriminator — the Order
+row was correct and complete throughout, but job history is now complete too.
+
+#### 4.2c Phase 5 known gaps
+
+| # | Gap | Status |
+|---|---|---|
+| D1 | ~~No real Shopify order has ever been created by this code.~~ **RESOLVED.** One controlled live order ran end to end: one draft, one order `#1001`, local `SYNCED`, Shopify `displayFinancialStatus: PENDING` with the full amount outstanding, totals matching to the cent, no duplicates, no PII in logs. See 4.2d. | Closed. |
+| D2 | ~~Protected customer data (Level 2) is not enabled for this app.~~ **RESOLVED.** After reinstalling through the Custom distribution link, `CalculatedDraftOrder` is returned and the full guest-COD input — name, email, phone, address — validates with zero userErrors. | Closed. The four Level 2 fields were never weakened or removed to work around it; the block was a configuration state on the app, and it is gone. |
+| D3 | **`province` is not sent as structured data.** `MailingAddressInput` on 2026-07 has `provinceCode` and no free-text province; the checkout collects a name ("Punjab"), and sending a name as a code would be refused or resolved elsewhere. It goes in the order note instead. | Deliberate. A name -> code mapping per country is its own feature. |
+| D4 | **No operator UI for FAILED orders.** A permanently failed order sits in MySQL with `failureReason` and `lastError` and nothing surfaces it. | The recovery sweep does not pick up `FAILED` (by design — it would retry a refusal forever), so this needs the admin screen. |
+| D5 | **Stranded drafts are never swept.** An order that reached `DRAFT_CREATED` and then failed permanently leaves a real draft in Shopify. Drafts are inert — no inventory, no customer-visible order — but they accumulate. | Reconciliation job, not yet written. |
+| D6 | **Shopify cost pacing is still process-local (S2).** Submissions now spend from the same per-shop bucket as the catalog sync, and two worker processes would each pace against their own partial view. | Unchanged from Phase 2; more consequential now. |
+| D7 | **Inventory is still not reserved (C1).** A submission can therefore fail, or produce an unfulfillable order, because stock went to zero between checkout and submission. | Accepted, documented at 4.1. |
+| D8 | **BullMQ's stall timer is shorter than the database lease** (120s vs 300s). A submission that outlives the stall timer is re-delivered, the re-delivery finds a live claim and stands down. If the original process actually died, nothing submits until the recovery sweep notices. | Bounded and self-healing: the worst case is one sweep interval of delay, never a duplicate. Tightening it means raising `lockDuration` or lowering the lease. |
+| D9 | **`draftOrderComplete` is not idempotent by contract.** Safety comes from the lookup before it, which is a read-then-act with a window. | The window is small and the alternative — Shopify-side idempotency keys on this mutation — does not exist. The unique index on `shopifyOrderId` is the final backstop. |
+| D10 | **COD relies on a DEPRECATED argument.** `draftOrderComplete(paymentPending: true)` is the default because `paymentTerms` — the documented replacement — is refused: *"The user must have access to set payment terms."* Present and functional on 2026-07, but Shopify has named its successor, so a future API version will remove it. | **Migration is one setting:** grant the app permission to set payment terms, then `SHOPIFY_COD_PAYMENT_MODE=payment_terms`. Both paths are implemented and unit-tested; only the permission is missing. Re-check on every API-version bump. |
+| D11 | ~~`JobLog` can lose an attempt.~~ **RESOLVED.** A `jobInstance` column (BullMQ's `job.timestamp`) now discriminates one job instance from its replacement, and the uniqueness is `(bullJobId, jobInstance, attempt)` — so a replacement job's attempt 1 is recorded alongside the attempt 1 of the job it replaced, while re-logging a given attempt of a given instance stays idempotent. Migration `20260929172148_job_log_instance_discriminator`; the column defaults to `""` so pre-existing rows keep the old uniqueness among themselves. | Closed. Regression tests assert both attempt-1 rows persist with distinct instances, that attempts within one instance still number 1..n, and that the instance is recorded on a first attempt. |
 
 ### 4.3 Idempotency
 

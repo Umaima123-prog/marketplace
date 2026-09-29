@@ -73,6 +73,58 @@ export const env = Object.freeze(
     shopifyVariantsPerPage: integer("SHOPIFY_VARIANTS_PER_PAGE", 100, 1),
     productSyncIntervalMinutes: integer("PRODUCT_SYNC_INTERVAL_MINUTES", 15, 1),
     /**
+     * How long a worker's claim on an order is believed.
+     *
+     * A SYNCING row whose `claimedAt` is older than this belonged to a worker
+     * that died, and may be reclaimed. It must comfortably exceed the worst-case
+     * submission -- two Shopify round trips plus retries -- or a healthy slow
+     * job gets reclaimed underneath itself and the order is submitted twice.
+     * BullMQ's own lockDuration is 120s, so 300s leaves real headroom.
+     */
+    orderClaimLeaseSeconds: integer("ORDER_CLAIM_LEASE_SECONDS", 300, 60),
+    /**
+     * How old a PENDING_SYNC order must be before the recovery sweep re-enqueues
+     * it. Long enough that an order committed microseconds ago -- whose enqueue
+     * is still in flight -- is never swept.
+     */
+    orderRecoveryGraceSeconds: integer("ORDER_RECOVERY_GRACE_SECONDS", 120, 30),
+    /** How often the recovery sweep runs. */
+    orderRecoveryIntervalMinutes: integer("ORDER_RECOVERY_INTERVAL_MINUTES", 5, 1),
+    /**
+     * The order recovery sweep, with its OWN switch rather than sharing
+     * SYNC_SCHEDULERS_ENABLED.
+     *
+     * That flag exists to give a controlled catalog-sync run a quiet worker.
+     * Order recovery is a different kind of thing: with it off, an order whose
+     * enqueue was lost waits for a human to notice, and a customer waits for a
+     * delivery that was never sent. Conflating the two would mean turning off
+     * sync noise silently turns off the outbox drain. Default true, and there is
+     * no good reason to set it false outside a test.
+     */
+    orderRecoveryEnabled: (process.env.ORDER_RECOVERY_ENABLED?.trim() ?? "true") !== "false",
+    /**
+     * How "this order is unpaid, collect cash on delivery" is expressed to
+     * Shopify. Two mechanisms exist on API 2026-07 and neither is unconditionally
+     * available:
+     *
+     *   "payment_pending" (DEFAULT) - `draftOrderComplete(paymentPending: true)`.
+     *       Deprecated in favour of payment terms, but present, functional, needs
+     *       no extra permission, and means precisely "the payment is pending".
+     *
+     *   "payment_terms"             - payment terms on the draft, which is the
+     *       non-deprecated path. Requires a permission this app does not have:
+     *       `draftOrderCreate` refuses with "The user must have access to set
+     *       payment terms." Notably `draftOrderCalculate` accepts the same input,
+     *       so the input shape validating proves nothing about this.
+     *
+     * The default is the one that works. Switch to "payment_terms" once the
+     * permission is granted -- that is the whole migration.
+     */
+    codPaymentMode:
+      process.env.SHOPIFY_COD_PAYMENT_MODE?.trim() === "payment_terms"
+        ? ("payment_terms" as const)
+        : ("payment_pending" as const),
+    /**
      * Repeatable jobs are registered by the worker at boot. Set false to run a
      * worker that only processes what is explicitly enqueued -- used for a
      * controlled first run or a one-off reprocess, where a scheduled sync

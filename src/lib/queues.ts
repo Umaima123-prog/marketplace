@@ -49,6 +49,7 @@ export const QUEUE = {
   PRODUCT_SYNC_PAGE: "product-sync-page",
   VARIANT_SYNC: "variant-sync",
   SUBMIT_ORDER: "submit-order",
+  ORDER_RECOVERY: "order-recovery",
 } as const;
 
 export const JOB = {
@@ -56,6 +57,7 @@ export const JOB = {
   SYNC_PRODUCTS_PAGE: "sync-products-page",
   SYNC_VARIANTS: "sync-variants",
   SUBMIT_ORDER: "submit-order",
+  RECOVER_ORDERS: "recover-orders",
 } as const;
 
 export type SyncMode = "FULL" | "INCREMENTAL";
@@ -81,6 +83,12 @@ export interface ProductSyncPagePayload {
 export interface SubmitOrderPayload {
   orderId: string;
 }
+
+/**
+ * The recovery sweep carries no data: it is a "look for work" trigger, and the
+ * work it finds is whatever the database says needs submitting.
+ */
+export type OrderRecoveryPayload = Record<string, never>;
 
 /** Only for products whose variant connection exceeded one page. */
 export interface VariantSyncPayload {
@@ -142,6 +150,7 @@ let productSyncQueue: Queue<ProductSyncPayload> | undefined;
 let productSyncPageQueue: Queue<ProductSyncPagePayload> | undefined;
 let variantSyncQueue: Queue<VariantSyncPayload> | undefined;
 let submitOrderQueue: Queue<SubmitOrderPayload> | undefined;
+let orderRecoveryQueue: Queue<OrderRecoveryPayload> | undefined;
 
 export function getProductSyncQueue(): Queue<ProductSyncPayload> {
   productSyncQueue ??= new Queue<ProductSyncPayload>(QUEUE.PRODUCT_SYNC, {
@@ -175,6 +184,25 @@ export function getSubmitOrderQueue(): Queue<SubmitOrderPayload> {
   return submitOrderQueue;
 }
 
+/**
+ * The recovery sweep. Few attempts and a short backoff: a missed sweep is not a
+ * problem, because the next one is minutes away and finds the same rows.
+ */
+export const ORDER_RECOVERY_JOB_OPTIONS: JobsOptions = {
+  attempts: 2,
+  backoff: { type: "fixed", delay: 30_000 },
+  removeOnComplete: { age: 24 * 3600, count: 200 },
+  removeOnFail: { age: 7 * 24 * 3600, count: 500 },
+};
+
+export function getOrderRecoveryQueue(): Queue<OrderRecoveryPayload> {
+  orderRecoveryQueue ??= new Queue<OrderRecoveryPayload>(QUEUE.ORDER_RECOVERY, {
+    connection: getQueueConnection(),
+    defaultJobOptions: ORDER_RECOVERY_JOB_OPTIONS,
+  });
+  return orderRecoveryQueue;
+}
+
 /** The job id for an order's submission. One order, one id, forever. */
 export function submitOrderJobId(orderId: string): string {
   return buildJobId("order", orderId);
@@ -203,16 +231,53 @@ export async function enqueueSubmitOrder(
   const queue = getSubmitOrderQueue();
   const jobId = submitOrderJobId(orderId);
 
-  if (options.replaceExisting) {
-    // Removes only a job in a terminal state; BullMQ refuses to remove one that
-    // is currently active, which is the safe outcome.
-    await queue.remove(jobId).catch(() => undefined);
+  // Read first, then decide. Two BullMQ behaviours make this necessary and both
+  // were learned the hard way on a live order:
+  //
+  //   `add` with an existing jobId returns the PRE-EXISTING job, whose id equals
+  //   the requested one -- so `job.id === jobId` cannot tell "created" from
+  //   "already there". That was the original, wrong success test.
+  //
+  //   `remove` reports a count even when there was nothing to remove, so its
+  //   return value cannot tell "replaced" from "nothing was there".
+  const existing = await queue.getJob(jobId);
+  const existingState = existing ? await existing.getState().catch(() => "unknown") : undefined;
+
+  let removedExisting = false;
+  let removeError: string | undefined;
+
+  if (options.replaceExisting && existing) {
+    // A terminal job still owns this id for its whole retention window, so it has
+    // to go before an equivalent one can be added.
+    //
+    // NOT swallowed. An earlier version did `.catch(() => undefined)` here and it
+    // hid a real failure during a live retry: the remove did not take effect, the
+    // add was deduplicated against the completed job, and the caller was told the
+    // work was queued when nothing had been.
+    try {
+      await queue.remove(jobId);
+      // Verified rather than assumed, because the return value above does not
+      // distinguish "removed one" from "there was none".
+      removedExisting = (await queue.getJob(jobId)) === undefined;
+      if (!removedExisting) {
+        removeError = `job ${jobId} still present after remove (state: ${existingState})`;
+      }
+    } catch (error) {
+      removeError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   const job = await queue.add(JOB.SUBMIT_ORDER, { orderId }, { jobId });
 
-  // BullMQ returns a job whose id is undefined when a duplicate was suppressed.
-  return { jobId: job.id, enqueued: job.id === jobId };
+  return {
+    jobId: job.id,
+    // A job was created by THIS call when there was none, or when the one that
+    // was there has just been removed.
+    enqueued: existing === undefined || removedExisting,
+    ...(options.replaceExisting ? { removedExisting } : {}),
+    ...(removeError ? { removeError } : {}),
+    ...(existingState ? { deduplicatedAgainstState: existingState } : {}),
+  };
 }
 
 /** How long two identical manual triggers are treated as one. */
@@ -222,6 +287,12 @@ export interface EnqueueResult {
   jobId: string | undefined;
   /** False when an identical trigger inside the dedup window won instead. */
   enqueued: boolean;
+  /** `replaceExisting` only: whether a previous job actually was removed. */
+  removedExisting?: boolean;
+  /** Set when removing the previous job failed -- the add below is then a no-op. */
+  removeError?: string;
+  /** The terminal state an add was deduplicated against, when it was. */
+  deduplicatedAgainstState?: string;
 }
 
 /**

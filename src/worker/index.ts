@@ -16,8 +16,10 @@ import { createWorkerConnection } from "@/src/lib/redis";
 import { QUEUE } from "@/src/lib/queues";
 import { shouldRetry } from "@/src/lib/shopify/errors";
 
+import { processOrderRecovery } from "./processors/order-recovery";
 import { processProductSync } from "./processors/product-sync";
 import { processProductSyncPage } from "./processors/product-sync-page";
+import { submitOrderProcessor } from "./processors/submit-order";
 import { processVariantSync } from "./processors/variant-sync";
 import { registerRepeatableJobs } from "./scheduler";
 
@@ -38,11 +40,21 @@ function build<T>(
   processor: (job: Job<T>) => Promise<unknown>,
   concurrency: number,
 ): Worker<T> {
-  const worker = new Worker<T>(queueName, processor as never, {
-    connection: createWorkerConnection(),
-    concurrency,
-    lockDuration: LOCK_DURATION_MS,
-  });
+  // BullMQ calls a processor as `(job, token)`. Passing `processor` straight
+  // through therefore hands its SECOND parameter BullMQ's token string -- which
+  // silently defeated a dependency-injection default on the submit-order
+  // processor and produced "shopify.findDraftOrdersByQuery is not a function" on
+  // a live order. Wrapping to a single argument removes the whole class of bug
+  // for every processor, present and future.
+  const worker = new Worker<T>(
+    queueName,
+    ((job: Job<T>) => processor(job)) as never,
+    {
+      connection: createWorkerConnection(),
+      concurrency,
+      lockDuration: LOCK_DURATION_MS,
+    },
+  );
 
   worker.on("failed", (job, error) => {
     const attempt = (job?.attemptsMade ?? 0) + 1;
@@ -112,6 +124,19 @@ async function main(): Promise<void> {
   build(QUEUE.PRODUCT_SYNC_PAGE, processProductSyncPage, 3);
   build(QUEUE.VARIANT_SYNC, processVariantSync, 3);
 
+  // submit-order runs at concurrency 1, and this one is a correctness-adjacent
+  // choice rather than a throughput one. The conditional claim already makes a
+  // second concurrent consumer SAFE -- two workers cannot submit one order twice
+  // -- but serialising submission also keeps it roughly FIFO, so the customer
+  // who checked out first is sent to Shopify first. Each submission is two
+  // Shopify round trips, so this caps order throughput; raising it is a
+  // deliberate decision that needs the cross-process cost limiter first (S2).
+  build(QUEUE.SUBMIT_ORDER, submitOrderProcessor, 1);
+
+  // The outbox drain. Concurrency 1 because two sweeps would find the same rows
+  // and race to enqueue the same job ids for no benefit.
+  build(QUEUE.ORDER_RECOVERY, processOrderRecovery, 1);
+
   await registerRepeatableJobs(log);
 
   log.info(
@@ -120,6 +145,8 @@ async function main(): Promise<void> {
         [QUEUE.PRODUCT_SYNC]: 1,
         [QUEUE.PRODUCT_SYNC_PAGE]: 3,
         [QUEUE.VARIANT_SYNC]: 3,
+        [QUEUE.SUBMIT_ORDER]: 1,
+        [QUEUE.ORDER_RECOVERY]: 1,
       },
       costPacing: "process-local",
       event: "worker_ready",

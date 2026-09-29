@@ -48,6 +48,7 @@ export async function processProductSync(job: Job<ProductSyncPayload>): Promise<
       queueName: QUEUE.PRODUCT_SYNC,
       jobName: JOB.SYNC_PRODUCTS,
       bullJobId: String(job.id),
+      jobInstance: String(job.timestamp),
       attempt,
       maxAttempts: job.opts.attempts ?? 1,
     },

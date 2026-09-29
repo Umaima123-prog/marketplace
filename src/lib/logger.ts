@@ -104,6 +104,12 @@ export function jobLogger(fields: {
   attempt: number;
   syncRunId?: string;
   productGid?: string;
+  /**
+   * The LOCAL order id. Safe to bind to every line of a submission, and the only
+   * order identifier that is: the reference is customer-facing, and everything
+   * else on the row is PII.
+   */
+  orderId?: string;
 }): Logger {
   return logger.child(fields);
 }

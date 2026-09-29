@@ -60,6 +60,7 @@ export async function processVariantSync(job: Job<VariantSyncPayload>): Promise<
       queueName: QUEUE.VARIANT_SYNC,
       jobName: JOB.SYNC_VARIANTS,
       bullJobId: String(job.id),
+      jobInstance: String(job.timestamp),
       attempt,
       maxAttempts: job.opts.attempts ?? 1,
       entityType: "PRODUCT",
