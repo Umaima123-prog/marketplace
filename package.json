@@ -6,23 +6,33 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "node --env-file-if-exists=.env scripts/prepare-test-db.mjs && node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.mts",
+    "worker": "node --import tsx --env-file-if-exists=.env src/worker/index.ts",
+    "worker:dev": "node --import tsx --watch --env-file-if-exists=.env src/worker/index.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",
+    "bullmq": "^6.3.9",
+    "ioredis": "^6.0.0",
     "next": "16.3.6",
+    "pino": "^10.3.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^24.19.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.6",
     "prisma": "6.19.3",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.0.2"
   }
 }

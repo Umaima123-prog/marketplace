@@ -1,9 +1,9 @@
 # Architecture — COD Marketplace on Shopify
 
-Status: **Phase 1 — decisions locked; schema, initial migration and local infrastructure
-applied.** MySQL 8.4 and Redis 7 run from `docker-compose.yml`, migration `20260929053009_init`
-is applied, and Prisma Client generates. No Shopify calls, no workers, no UI, no checkout
-implementation yet.
+Status: **Phase 2 — product synchronization implemented, not yet run against a real store.**
+MySQL 8.4 and Redis 7 run from `docker-compose.yml`, migration `20260929053009_init` is applied,
+and the sync worker runs as a separate process (`npm run worker`). No storefront UI, no cart,
+no checkout, no order submission yet.
 
 ---
 
@@ -155,6 +155,105 @@ Catalog reads use `use cache` + `cacheLife`. The sync worker is a different proc
 call `revalidateTag` — that API exists only inside the Next runtime. Invalidation is time-based by
 default, with an optional authenticated internal revalidate endpoint. Cache lifetime must be ≤ the
 sync interval or it compounds staleness.
+
+### 3.6 Phase 2 as implemented
+
+Implemented and exercised end to end against real MySQL and real Redis. **Not yet run against a
+Shopify store** -- the credentials are unset, and the client correctly refuses with a terminal
+configuration error rather than retrying.
+
+| Concern | File |
+|---|---|
+| Env, split core vs Shopify | `src/lib/env.ts` |
+| Logger, redaction | `src/lib/logger.ts` |
+| Prisma singleton, P2002 predicate | `src/lib/prisma.ts` |
+| Redis connections | `src/lib/redis.ts` |
+| Queue names, payloads, job options | `src/lib/queues.ts` |
+| Admin GraphQL client | `src/lib/shopify/client.ts` |
+| Failure taxonomy | `src/lib/shopify/errors.ts` |
+| Cost/throttle arithmetic (pure) | `src/lib/shopify/throttle.ts` |
+| Queries, page sizes | `src/lib/shopify/queries.ts` |
+| GraphQL -> row mapping (pure) | `src/lib/sync/product-mapper.ts` |
+| Sync decisions (pure) | `src/lib/sync/decisions.ts` |
+| Writes, upsert races, sweep | `src/lib/sync/catalog-repo.ts` |
+| Run lock, heartbeat, finalisation | `src/lib/sync/sync-run.ts` |
+| Durable job history | `src/lib/jobs/job-log.ts` |
+| Processors | `src/worker/processors/*.ts` |
+| Worker entry, schedulers | `src/worker/index.ts`, `src/worker/scheduler.ts` |
+| Manual trigger | `app/api/admin/sync/route.ts` |
+
+**Deviations from the plan above, and why.**
+
+- **No `SyncRun.failures` column.** §3.2 assumed a counter. There is none in the schema, and
+  deriving one from `JobLog` would count transient attempts that later succeeded, which would
+  block the sweep almost every run. Instead a page that exhausts *all* its attempts sets
+  `SyncRun.status = PARTIAL`, so the run's own status is the durable record of "a page was
+  permanently lost" -- exactly the condition the sweep gate needs. No migration was added.
+- **Shopify credentials are validated on first use, not at import.** The web process never calls
+  Shopify, so requiring a token to boot Next would enforce the opposite of the §2 boundary, and
+  would make `next build` need a production credential.
+- **Variant chains carry `syncRunId`** so a long chain refreshes the run heartbeat; without it a
+  product with thousands of variants looks like a dead run to the reclaimer.
+
+**Storefront completeness rule.** `Product.variantSyncComplete = false` means the stored variant
+set is **truncated**, and the storefront must not present that product as complete. The flag flips
+to true only when Shopify reports `hasNextPage: false`; a chain that dies halfway leaves it false,
+which is a durable, visible statement rather than a silent lie.
+
+### 3.6b When a run may be called COMPLETED
+
+`SyncRun.status = COMPLETED` is a claim about the whole catalog, because it is what
+unlocks the sweep. It is written only when **all** of these hold:
+
+1. **Every page succeeded.** A page that exhausts its attempts calls `failSyncRun`, which
+   ends the run `PARTIAL` and releases the lock. This is not optional bookkeeping: page N is
+   what enqueues page N+1, so a permanently failed page means no later job exists and nothing
+   would ever finalise the run. It would otherwise sit `RUNNING`, holding the lock until the
+   heartbeat went stale, while reporting a state that is not true.
+2. **The last page's transaction committed.** Finalisation happens after it, in the same job.
+3. **The sweep completed**, when the gate allowed one. The sweep runs *before* the status is
+   written, so if it throws, the job fails, the run stays `RUNNING`, and BullMQ retries the
+   page. A run is never `COMPLETED` with an unfinished sweep.
+4. **The run still belongs to this job.** Finalisation re-reads the row and refuses to write a
+   status onto a run that was reclaimed or finalised by someone else.
+
+**Variant chains are the deliberate exception.** A run may complete while chains are still in
+flight, because every product they cover carries `variantSyncComplete = false` -- an explicit,
+durable statement that its variant set is truncated (§3.3). The count is recorded on the
+completion log line, so `COMPLETED` is never read as a stronger claim than it is.
+
+A page that finds its run already ended returns `abandoned: true` and writes nothing. The job
+succeeds because retrying cannot help, but the flag keeps an empty success from looking like a
+completed page.
+
+### 3.6c Worker concurrency
+
+| Queue | Concurrency | Why |
+|---|---|---|
+| `product-sync` | **1**, explicitly | Two orchestrators would race for one database lock and the loser would do nothing but log that it lost. The lock makes a second runner harmless; concurrency 1 makes it pointless too. |
+| `product-sync-page` | 3 | Ceiling is Shopify's cost bucket, not CPU. Re-tune from `requestedCost` / `availableCost` on the `page_complete` line once real catalog sizes are known. |
+| `variant-sync` | 3 | As above. |
+
+**Cost pacing is process-local.** The Shopify client keeps the last observed
+`throttleStatus` in module state, so the three page workers in one process share one view of
+the bucket. Shopify meters that bucket **per shop**, so running N worker processes means N
+partial views and roughly N times the intended request rate. Scaling the worker horizontally
+in production therefore requires a **shared limiter** -- a Redis token bucket in front of every
+Shopify call -- not a larger concurrency number. Tracked as S2.
+
+### 3.7 Known gaps in the sync (Phase 2)
+
+| # | Gap | Effect | Status |
+|---|---|---|---|
+| S1 | **Webhook vs sweep race.** A `products/create` webhook (bonus scope, not yet built) could write a product *after* a FULL run's last page but *before* its sweep. The new row carries a different `lastSyncRunId`, so the sweep would immediately deactivate a product that exists. | A just-created product disappears from the storefront until the next full run. | **Open, documented.** Partial protection today: webhooks are not implemented, so the race cannot fire yet. When they are, the fix is to exclude rows created after `SyncRun.startedAt` from the sweep predicate, or to have webhook writes stamp the active run id. |
+| S2 | **Cost pacing is per process.** `lastKnownCost` is module state, so N worker processes each pace against their own view of a bucket that Shopify meters per shop. | With several workers, throttling is discovered by being rejected rather than avoided. | Open. A shared limiter (Redis token bucket) is the fix; single-process development does not need it. |
+| S3 | **Images are hard-deleted on reconcile.** Correct today -- nothing references `ProductImage` -- but it is the one place the sync deletes rather than deactivates. | None now. | Accepted, noted so it is revisited if images ever get referenced. |
+| S4 | **`shopCurrency()` is cached per process for the worker's lifetime.** A shop that changes its currency mid-process keeps writing the old code until restart. | Vanishingly rare; wrong currency codes on variants written after the change. | Accepted. |
+| S5 | **A page abandoned because the run is no longer RUNNING returns success.** | **Closed.** The result now carries `abandoned: true` rather than looking like a completed page, and finalisation refuses to write a status onto a run it no longer owns. A page that permanently fails now ends the run itself (`failSyncRun`), because the chain is the run: no later page job would exist to finalise it. |
+| S6 | **No integration test against real MySQL.** | **Closed.** `npm run test:integration` runs 28 tests against a dedicated `marketplace_test` database: upserts, idempotency, DECIMAL round-trip, image reconciliation, a real P2002 collision, soft deactivation, the sweep including its NULL-safe predicate, and the lock/heartbeat/finalisation lifecycle. The harness refuses to start unless the database name ends in `_test`. |
+| S7 | **`variant-sync` infers `currencyCode` from an already-written sibling variant.** A product whose inline variant page wrote nothing would fall back to `"USD"`. | Unreachable today -- a chain only exists when the inline page wrote 100 variants. | Accepted, guarded by the fallback. |
+
+---
 
 ---
 
