@@ -16,7 +16,14 @@ import type { Job } from "bullmq";
 import { prisma } from "@/src/lib/prisma";
 import { jobLogger } from "@/src/lib/logger";
 import { withJobLog } from "@/src/lib/jobs/job-log";
-import { JOB, QUEUE, getVariantSyncQueue, type VariantSyncPayload } from "@/src/lib/queues";
+import {
+  JOB,
+  QUEUE,
+  buildJobId,
+  getVariantSyncQueue,
+  shortDigest,
+  type VariantSyncPayload,
+} from "@/src/lib/queues";
 import { shopifyGraphQL } from "@/src/lib/shopify/client";
 import { PRODUCT_VARIANTS_PAGE_QUERY, VARIANTS_PER_PAGE } from "@/src/lib/shopify/queries";
 import { mapVariantsPage } from "@/src/lib/sync/product-mapper";
@@ -116,7 +123,14 @@ export async function processVariantSync(job: Job<VariantSyncPayload>): Promise<
         await getVariantSyncQueue().add(
           JOB.SYNC_VARIANTS,
           { syncRunId, productId, shopifyProductId, cursor: page.endCursor },
-          { jobId: `${syncRunId}:variants:${shopifyProductId}:${page.endCursor ?? "end"}` },
+          {
+            jobId: buildJobId(
+              syncRunId,
+              "variants",
+              shopifyProductId.split("/").pop(),
+              shortDigest(page.endCursor),
+            ),
+          },
         );
       }
 

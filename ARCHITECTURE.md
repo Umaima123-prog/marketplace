@@ -241,15 +241,42 @@ partial views and roughly N times the intended request rate. Scaling the worker 
 in production therefore requires a **shared limiter** -- a Redis token bucket in front of every
 Shopify call -- not a larger concurrency number. Tracked as S2.
 
+### 3.6d Live verification against the development store
+
+Run against `merchant-product-enrichment-hub.myshopify.com` (17 products, 26 variants,
+18 images), triggered through `POST /api/admin/sync` and processed by the separate worker.
+
+| Run | Page size | Pages | Result |
+|---|---|---|---|
+| 1 | 50 (default) | 1 | COMPLETED in 2 382 ms; 17 products, 26 variants created |
+| 2 | 50 (default) | 1 | COMPLETED in 1 270 ms; **0 created, 17 updated** -- counts unchanged, no duplicates |
+| 3 | **5** (`SHOPIFY_PRODUCTS_PER_PAGE=5`) | **4** | COMPLETED in 4 067 ms; pages of 5, 5, 5, 2 |
+
+Run 3 exists because 17 products fit in one default page, and a single-page run cannot
+demonstrate cursor pagination -- it is indistinguishable from a hard-coded first page. The
+page size is overridable by environment for exactly this reason; the committed default
+remains 50.
+
+Cost per page is measured, not assumed: **143 requested against a 2 000 bucket** at page
+size 5, and **331** at page size 50. Either leaves the bucket healthy.
+
+**Not exercised by live data:** nested variant pagination. The largest variant set on the
+store is 5, so no product ever reported `variants.pageInfo.hasNextPage: true` and no
+`variant-sync` chain was enqueued in any run. That path is covered by automated tests only
+-- mapping of a 100-variant page, the continuation walk across three pages, and the rule
+that `variantSyncComplete` flips to true only on `hasNextPage: false`. Creating a
+100-variant product purely to exercise it was deliberately not done.
+
 ### 3.7 Known gaps in the sync (Phase 2)
 
 | # | Gap | Effect | Status |
 |---|---|---|---|
 | S1 | **Webhook vs sweep race.** A `products/create` webhook (bonus scope, not yet built) could write a product *after* a FULL run's last page but *before* its sweep. The new row carries a different `lastSyncRunId`, so the sweep would immediately deactivate a product that exists. | A just-created product disappears from the storefront until the next full run. | **Open, documented.** Partial protection today: webhooks are not implemented, so the race cannot fire yet. When they are, the fix is to exclude rows created after `SyncRun.startedAt` from the sweep predicate, or to have webhook writes stamp the active run id. |
-| S2 | **Cost pacing is per process.** `lastKnownCost` is module state, so N worker processes each pace against their own view of a bucket that Shopify meters per shop. | With several workers, throttling is discovered by being rejected rather than avoided. | Open. A shared limiter (Redis token bucket) is the fix; single-process development does not need it. |
+| S2 | **Cost pacing is per process.** Measured: 143 cost per page at page size 5, 331 at page size 50, against a 2 000 bucket. `lastKnownCost` is module state, so N worker processes each pace against their own view of a bucket that Shopify meters per shop. | With several workers, throttling is discovered by being rejected rather than avoided. | Open. A shared limiter (Redis token bucket) is the fix; single-process development does not need it. |
 | S3 | **Images are hard-deleted on reconcile.** Correct today -- nothing references `ProductImage` -- but it is the one place the sync deletes rather than deactivates. | None now. | Accepted, noted so it is revisited if images ever get referenced. |
 | S4 | **`shopCurrency()` is cached per process for the worker's lifetime.** A shop that changes its currency mid-process keeps writing the old code until restart. | Vanishingly rare; wrong currency codes on variants written after the change. | Accepted. |
 | S5 | **A page abandoned because the run is no longer RUNNING returns success.** | **Closed.** The result now carries `abandoned: true` rather than looking like a completed page, and finalisation refuses to write a status onto a run it no longer owns. A page that permanently fails now ends the run itself (`failSyncRun`), because the chain is the run: no later page job would exist to finalise it. |
+| S8 | **Nested variant pagination has never run against live data.** The store's largest variant set is 5, so `variant-sync` has never been enqueued outside tests. | A defect in the continuation chain would not have been caught by any live run. | Open. Covered by unit tests; would need a 100+ variant product, or a temporarily lowered `SHOPIFY_VARIANTS_PER_PAGE`, to exercise for real. |
 | S6 | **No integration test against real MySQL.** | **Closed.** `npm run test:integration` runs 28 tests against a dedicated `marketplace_test` database: upserts, idempotency, DECIMAL round-trip, image reconciliation, a real P2002 collision, soft deactivation, the sweep including its NULL-safe predicate, and the lock/heartbeat/finalisation lifecycle. The harness refuses to start unless the database name ends in `_test`. |
 | S7 | **`variant-sync` infers `currencyCode` from an already-written sibling variant.** A product whose inline variant page wrote nothing would fall back to `"USD"`. | Unreachable today -- a chain only exists when the inline page wrote 100 variants. | Accepted, guarded by the fallback. |
 

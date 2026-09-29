@@ -51,6 +51,21 @@ const REDACT_PATHS = [
   "*.addressLine2",
 ];
 
+/**
+ * Synchronous writes.
+ *
+ * pino buffers asynchronously by default, which is faster and fine for a
+ * long-lived server whose process exits cleanly. It is wrong here: a worker
+ * killed mid-run (a deploy, a crash, an operator with SIGKILL) discards the
+ * buffer, and the log of what it was doing when it died -- the single most
+ * useful log there is -- vanishes. Observed: a completed sync whose page-level
+ * lines were lost while the run sat COMPLETED in MySQL.
+ *
+ * The durable record is still JobLog in the database; this just stops the
+ * narrative log from lying by omission.
+ */
+const destination = pino.destination({ sync: true });
+
 export const logger = pino({
   level: env.logLevel,
   redact: { paths: REDACT_PATHS, censor: "[redacted]" },
@@ -64,7 +79,7 @@ export const logger = pino({
   formatters: {
     level: (label) => ({ level: label }),
   },
-});
+}, destination);
 
 export type Logger = pino.Logger;
 

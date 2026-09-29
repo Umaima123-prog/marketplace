@@ -13,6 +13,7 @@ import { withJobLog } from "@/src/lib/jobs/job-log";
 import {
   JOB,
   QUEUE,
+  buildJobId,
   getProductSyncPageQueue,
   type ProductSyncPayload,
 } from "@/src/lib/queues";
@@ -89,7 +90,7 @@ export async function processProductSync(job: Job<ProductSyncPayload>): Promise<
         { syncRunId: run.id, cursor: null, pageIndex: 0 },
         // Deterministic id so a retry of THIS orchestrator cannot enqueue a
         // second page-0 for the same run.
-        { jobId: `${run.id}:page:0` },
+        { jobId: buildJobId(run.id, "page", 0) },
       );
 
       log.info(

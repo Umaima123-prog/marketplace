@@ -18,6 +18,7 @@
 import { shopifyEnv } from "../env";
 import { logger, type Logger } from "../logger";
 
+import { getAccessToken, invalidateAccessToken } from "./auth";
 import { ShopifyError } from "./errors";
 import {
   MAX_INLINE_THROTTLE_WAIT_MS,
@@ -80,17 +81,21 @@ export async function shopifyGraphQL<T>(
   // retried -- 3 times here, then 5 times by BullMQ, for a condition no retry
   // can fix. Configuration errors must be terminal and obvious.
   let url: string;
-  let accessToken: string;
   try {
     const shopify = shopifyEnv();
     url = `https://${shopify.shopDomain}/admin/api/${shopify.apiVersion}/graphql.json`;
-    accessToken = shopify.accessToken;
   } catch (cause) {
     throw new ShopifyError(
       `Shopify is not configured: ${cause instanceof Error ? cause.message : String(cause)}`,
       { kind: "auth", retryable: false, cause },
     );
   }
+
+  // One 401 is allowed to mean "the token died earlier than advertised" -- the
+  // client credentials grant issues expiring tokens, and a revoked or rotated
+  // one looks identical. The cache is dropped and the call retried ONCE; a
+  // second 401 is a real credential problem.
+  let refreshedAfter401 = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     // Proactive pacing: if the previous response left the bucket too low for a
@@ -106,6 +111,11 @@ export async function shopifyGraphQL<T>(
         await sleep(capped);
       }
     }
+
+    // Acquired per attempt, so a retry after a 401 picks up the fresh token.
+    // The token is a local, used once, in one header -- never logged, never in
+    // a URL, never attached to an error.
+    const accessToken = await getAccessToken(log);
 
     const started = Date.now();
     let response: Response;
@@ -139,13 +149,29 @@ export async function shopifyGraphQL<T>(
 
     const durationMs = Date.now() - started;
 
-    // 401/403 mean the integration is broken, not this request. Fail now.
+    if (response.status === 401 && !refreshedAfter401 && attempt < maxAttempts) {
+      // Expiring token, revoked token, or rotated credentials. Drop the cache
+      // and try once with a freshly exchanged token.
+      refreshedAfter401 = true;
+      invalidateAccessToken();
+      log.warn(
+        { operation: options.operation, attempt, event: "shopify_token_refresh" },
+        "Shopify returned 401; re-exchanging the access token and retrying once",
+      );
+      continue;
+    }
+
+    // A second 401, or any 403: the integration is broken, not this request.
+    // 403 in particular is a missing scope, which no retry and no fresh token
+    // can fix -- the app version's declared access has to change.
     if (response.status === 401 || response.status === 403) {
-      throw new ShopifyError("Shopify rejected the access token (check scopes and token validity)", {
-        kind: "auth",
-        retryable: false,
-        status: response.status,
-      });
+      throw new ShopifyError(
+        response.status === 403
+          ? "Shopify denied the request (403): the token lacks a required scope. " +
+            "Scopes come from the app version's declared access, not from the token request."
+          : "Shopify rejected the access token (401) even after re-exchanging it",
+        { kind: "auth", retryable: false, status: response.status },
+      );
     }
 
     if (response.status === 429) {

@@ -14,8 +14,10 @@ import { withJobLog } from "@/src/lib/jobs/job-log";
 import {
   JOB,
   QUEUE,
+  buildJobId,
   getProductSyncPageQueue,
   getVariantSyncQueue,
+  shortDigest,
   type ProductSyncPagePayload,
 } from "@/src/lib/queues";
 import { shopifyGraphQL } from "@/src/lib/shopify/client";
@@ -173,7 +175,16 @@ export async function processProductSyncPage(job: Job<ProductSyncPagePayload>): 
         await getVariantSyncQueue().add(
           JOB.SYNC_VARIANTS,
           { syncRunId, productId: chain.productId, shopifyProductId: chain.shopifyProductId, cursor: chain.cursor },
-          { jobId: `${syncRunId}:variants:${chain.shopifyProductId}:${chain.cursor ?? "start"}` },
+          // The GID carries "://", so it is reduced to its numeric tail, and the
+          // cursor is digested rather than embedded.
+          {
+            jobId: buildJobId(
+              syncRunId,
+              "variants",
+              chain.shopifyProductId.split("/").pop(),
+              shortDigest(chain.cursor),
+            ),
+          },
         );
       }
 
@@ -192,8 +203,14 @@ export async function processProductSyncPage(job: Job<ProductSyncPagePayload>): 
           variantsUpserted,
           variantChainsEnqueued: variantChains.length,
           hasNextPage: page.hasNextPage,
+          // Digests, not prefixes: every Shopify cursor begins with the same
+          // base64 of `{"last_id`, so a prefix comparison cannot tell two
+          // cursors apart and would "prove" a handoff that never happened.
+          cursorIn: cursor ? shortDigest(cursor) : null,
+          cursorOut: page.endCursor ? shortDigest(page.endCursor) : null,
           requestedCost: cost?.requestedQueryCost,
           availableCost: cost?.throttleStatus.currentlyAvailable,
+          pageSize: PRODUCTS_PER_PAGE,
           event: "page_complete",
         },
         "product page written",
@@ -203,7 +220,7 @@ export async function processProductSyncPage(job: Job<ProductSyncPagePayload>): 
         await getProductSyncPageQueue().add(
           JOB.SYNC_PRODUCTS_PAGE,
           { syncRunId, cursor: page.endCursor, pageIndex: pageIndex + 1 },
-          { jobId: `${syncRunId}:page:${pageIndex + 1}` },
+          { jobId: buildJobId(syncRunId, "page", pageIndex + 1) },
         );
 
         return {

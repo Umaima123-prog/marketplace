@@ -16,6 +16,14 @@ const INCREMENTAL_SCHEDULER_ID = "product-sync-incremental";
 const NIGHTLY_SCHEDULER_ID = "product-sync-nightly";
 
 export async function registerRepeatableJobs(log: Logger): Promise<void> {
+  if (!env.syncSchedulersEnabled) {
+    log.warn(
+      { event: "schedulers_disabled" },
+      "SYNC_SCHEDULERS_ENABLED=false: this worker processes only what is explicitly enqueued",
+    );
+    return;
+  }
+
   // Queue.upsertJobScheduler is the supported entry point; constructing a bare
   // JobScheduler is an internal detail of BullMQ and its signature differs
   // between minor versions.

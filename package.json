@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "node --env-file-if-exists=.env scripts/prepare-test-db.mjs && node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.mts",
+    "verify:shopify": "node --import tsx --env-file-if-exists=.env scripts/verify-shopify-auth.mts",
     "worker": "node --import tsx --env-file-if-exists=.env src/worker/index.ts",
     "worker:dev": "node --import tsx --watch --env-file-if-exists=.env src/worker/index.ts"
   },

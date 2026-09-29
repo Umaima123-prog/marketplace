@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { __resetShopifyEnv, hasShopifyEnv, shopifyEnv } from "@/src/lib/env";
 
-const KEYS = ["SHOPIFY_SHOP_DOMAIN", "SHOPIFY_ADMIN_ACCESS_TOKEN", "SHOPIFY_API_VERSION"] as const;
+const KEYS = [
+  "SHOPIFY_SHOP_DOMAIN",
+  "SHOPIFY_ADMIN_ACCESS_TOKEN",
+  "SHOPIFY_API_VERSION",
+  "SHOPIFY_CLIENT_ID",
+  "SHOPIFY_CLIENT_SECRET",
+] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 
 afterEach(() => {
@@ -42,6 +48,49 @@ describe("shopify env is validated on use, not on import", () => {
     } catch (error) {
       const message = (error as Error).message;
       for (const key of KEYS) expect(message).toContain(key);
+    }
+  });
+
+  it("accepts client credentials with no permanent token -- the primary path", () => {
+    setShopify({
+      SHOPIFY_SHOP_DOMAIN: "store.myshopify.com",
+      SHOPIFY_API_VERSION: "2026-07",
+      SHOPIFY_CLIENT_ID: "placeholder-client-id",
+      SHOPIFY_CLIENT_SECRET: "placeholder-client-secret",
+    });
+    const env = shopifyEnv();
+    expect(env.clientId).toBe("placeholder-client-id");
+    expect(env.accessToken).toBe("");
+  });
+
+  it("rejects a client id with no secret", () => {
+    setShopify({
+      SHOPIFY_SHOP_DOMAIN: "store.myshopify.com",
+      SHOPIFY_API_VERSION: "2026-07",
+      SHOPIFY_CLIENT_ID: "placeholder-client-id",
+    });
+    expect(() => shopifyEnv()).toThrow(/SHOPIFY_CLIENT_SECRET is required/);
+  });
+
+  it("rejects a configuration with neither mechanism", () => {
+    setShopify({
+      SHOPIFY_SHOP_DOMAIN: "store.myshopify.com",
+      SHOPIFY_API_VERSION: "2026-07",
+    });
+    expect(() => shopifyEnv()).toThrow(/SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET/);
+  });
+
+  it("never puts the client secret in an error message", () => {
+    setShopify({
+      SHOPIFY_SHOP_DOMAIN: "bad-domain",
+      SHOPIFY_API_VERSION: "2026-07",
+      SHOPIFY_CLIENT_ID: "placeholder-client-id",
+      SHOPIFY_CLIENT_SECRET: "super-secret-client-secret",
+    });
+    try {
+      shopifyEnv();
+    } catch (error) {
+      expect((error as Error).message).not.toContain("super-secret-client-secret");
     }
   });
 

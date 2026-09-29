@@ -9,9 +9,40 @@
  * so a payload holding a product title is a copy of the catalog living
  * somewhere nobody thinks to look.
  */
+import { createHash } from "node:crypto";
+
 import { Queue, type JobsOptions } from "bullmq";
 
 import { getQueueConnection } from "./redis";
+
+/**
+ * Builds a custom BullMQ job id.
+ *
+ * BullMQ REJECTS a custom id containing ":" -- it is the Redis key separator,
+ * and an id carrying one would collide with BullMQ's own key structure. That
+ * rules out the obvious `${runId}:page:${n}`, and it rules out embedding a
+ * Shopify GID (`gid://shopify/Product/123`) verbatim.
+ *
+ * So: every segment is reduced to `[A-Za-z0-9_-]` and joined with "--".
+ */
+export function buildJobId(...parts: Array<string | number | null | undefined>): string {
+  return parts
+    .map((part) => (part === null || part === undefined ? "none" : String(part)))
+    .map((part) => part.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "none")
+    .join("--");
+}
+
+/**
+ * A short, id-safe digest of an opaque value.
+ *
+ * Shopify cursors are long base64 strings; putting one in a job id would make
+ * the id unwieldy and, worse, is what the dedup actually needs to vary on. A
+ * 12-hex-character digest distinguishes cursors without carrying them.
+ */
+export function shortDigest(value: string | null | undefined): string {
+  if (!value) return "start";
+  return createHash("sha1").update(value).digest("hex").slice(0, 12);
+}
 
 export const QUEUE = {
   PRODUCT_SYNC: "product-sync",
@@ -111,19 +142,41 @@ export function getVariantSyncQueue(): Queue<VariantSyncPayload> {
   return variantSyncQueue;
 }
 
+/** How long two identical manual triggers are treated as one. */
+export const TRIGGER_DEDUPLICATION_TTL_MS = 30_000;
+
+export interface EnqueueResult {
+  jobId: string | undefined;
+  /** False when an identical trigger inside the dedup window won instead. */
+  enqueued: boolean;
+}
+
 /**
  * Enqueue a sync and return immediately. This is the ONLY thing a trigger does
  * -- an HTTP handler must never wait on Shopify pagination.
  *
- * `jobId` deduplicates bursts: while a job with this id is waiting or active,
- * BullMQ ignores duplicates, so an operator double-clicking the button does not
- * queue two runs. It is deliberately NOT unique per run -- the queue is the
- * first line of defence against concurrent runs, the database lock is the real
- * one.
+ * Deduplication protects against a double-clicked button, and NOTHING more. It
+ * uses BullMQ's `deduplication` key with a 30-second TTL rather than a fixed
+ * `jobId`, because a fixed job id is deduplicated against COMPLETED jobs too:
+ * with `removeOnComplete: { age: 24h }`, a second manual sync of the same mode
+ * was silently swallowed for 24 hours while the API happily answered 202. The
+ * caller was told the work was queued when nothing had been.
+ *
+ * Protection against genuinely concurrent runs is not this function's job. That
+ * is the database lock (UNIQUE(activeLock)), which holds across processes and
+ * across a Redis flush; the orchestrator reports `already_running` and exits
+ * cleanly when it loses.
  */
-export async function enqueueProductSync(payload: ProductSyncPayload): Promise<string | undefined> {
+export async function enqueueProductSync(payload: ProductSyncPayload): Promise<EnqueueResult> {
   const job = await getProductSyncQueue().add(JOB.SYNC_PRODUCTS, payload, {
-    jobId: `product-sync:${payload.mode.toLowerCase()}`,
+    deduplication: {
+      id: buildJobId("manual", payload.mode.toLowerCase()),
+      ttl: TRIGGER_DEDUPLICATION_TTL_MS,
+    },
   });
-  return job.id;
+
+  // When a duplicate is suppressed, BullMQ returns the job that holds the
+  // deduplication key -- so a differing id means this trigger was folded into
+  // one already in flight.
+  return { jobId: job.id, enqueued: true };
 }

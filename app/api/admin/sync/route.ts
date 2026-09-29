@@ -41,15 +41,15 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const jobId = await enqueueProductSync({ mode, triggeredBy: "MANUAL" });
+    const result = await enqueueProductSync({ mode, triggeredBy: "MANUAL" });
 
-    // A duplicate id means a run of this mode is already queued. That is a
-    // success from the caller's point of view -- the work they asked for is
-    // going to happen -- so it is not an error, but it is worth saying.
-    log.info({ mode, jobId, event: "sync_enqueued" }, "manual sync enqueued");
+    log.info({ mode, jobId: result.jobId, event: "sync_enqueued" }, "manual sync enqueued");
 
+    // 202: accepted for processing. The run itself may still decline to start
+    // if another one holds the database lock -- the worker reports that, and it
+    // is not something this handler can or should wait to find out.
     return NextResponse.json(
-      { enqueued: true, mode, jobId: jobId ?? null },
+      { enqueued: result.enqueued, mode, jobId: result.jobId ?? null },
       { status: 202 },
     );
   } catch (error) {

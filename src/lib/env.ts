@@ -62,7 +62,23 @@ export const env = Object.freeze(
     databaseUrl: required("DATABASE_URL"),
     redisUrl: required("REDIS_URL"),
     syncHeartbeatStaleSeconds: integer("SYNC_HEARTBEAT_STALE_SECONDS", 600, 60),
+    /**
+     * Shopify page sizes. The DEFAULTS are the production values (50 products x
+     * 100 variants, see ARCHITECTURE 3.3); the override exists so a page size
+     * can be lowered for a controlled run -- a 17-product catalog needs a page
+     * size of 5 before cursor pagination is observable at all -- and so it can
+     * be tuned from the requestedCost/availableCost figures the page log emits.
+     */
+    shopifyProductsPerPage: integer("SHOPIFY_PRODUCTS_PER_PAGE", 50, 1),
+    shopifyVariantsPerPage: integer("SHOPIFY_VARIANTS_PER_PAGE", 100, 1),
     productSyncIntervalMinutes: integer("PRODUCT_SYNC_INTERVAL_MINUTES", 15, 1),
+    /**
+     * Repeatable jobs are registered by the worker at boot. Set false to run a
+     * worker that only processes what is explicitly enqueued -- used for a
+     * controlled first run or a one-off reprocess, where a scheduled sync
+     * firing at boot would race the run being observed. Default true.
+     */
+    syncSchedulersEnabled: (process.env.SYNC_SCHEDULERS_ENABLED?.trim() ?? "true") !== "false",
     logLevel: process.env.LOG_LEVEL?.trim() || "info",
     nodeEnv: process.env.NODE_ENV ?? "development",
   })),
@@ -74,8 +90,15 @@ export const env = Object.freeze(
 
 export interface ShopifyEnv {
   shopDomain: string;
-  accessToken: string;
   apiVersion: string;
+  /** Client credentials grant -- the primary mechanism. */
+  clientId: string;
+  clientSecret: string;
+  /**
+   * Optional. An admin-created custom app has a permanent, pre-generated token
+   * and needs no exchange; when this is set it short-circuits the grant.
+   */
+  accessToken: string;
 }
 
 let shopifyCache: ShopifyEnv | undefined;
@@ -97,10 +120,36 @@ export function shopifyEnv(): ShopifyEnv {
       problems.push(`SHOPIFY_API_VERSION must be a pinned version like "2026-07"`);
     }
 
+    // Two valid configurations, and at least one must be complete:
+    //   client credentials  -- SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET
+    //   custom app token    -- SHOPIFY_ADMIN_ACCESS_TOKEN
+    // Checked here rather than at the call site so a half-configured app fails
+    // at startup with a readable message instead of at the first API call.
+    const clientId = process.env.SHOPIFY_CLIENT_ID?.trim() ?? "";
+    const clientSecret = process.env.SHOPIFY_CLIENT_SECRET?.trim() ?? "";
+    const accessToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN?.trim() ?? "";
+    const hasClientCredentials = clientId.length > 0 && clientSecret.length > 0;
+
+    // Half-configured cases first: "you set one of the pair" is a far more
+    // useful message than "set one of two mechanisms", and the generic message
+    // would otherwise swallow it.
+    if (clientId.length > 0 && clientSecret.length === 0) {
+      problems.push("SHOPIFY_CLIENT_SECRET is required when SHOPIFY_CLIENT_ID is set");
+    } else if (clientSecret.length > 0 && clientId.length === 0) {
+      problems.push("SHOPIFY_CLIENT_ID is required when SHOPIFY_CLIENT_SECRET is set");
+    } else if (!hasClientCredentials && accessToken.length === 0) {
+      problems.push(
+        "set SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET (client credentials grant), " +
+          "or SHOPIFY_ADMIN_ACCESS_TOKEN (admin-created custom app)",
+      );
+    }
+
     return {
       shopDomain: shopDomain.toLowerCase(),
-      accessToken: required("SHOPIFY_ADMIN_ACCESS_TOKEN"),
       apiVersion,
+      clientId,
+      clientSecret,
+      accessToken,
     };
   });
 
@@ -133,7 +182,14 @@ export function describeEnv(): Record<string, string | number | boolean> {
     syncIntervalMinutes: env.productSyncIntervalMinutes,
     heartbeatStaleSeconds: env.syncHeartbeatStaleSeconds,
     shopifyConfigured: shopify !== null,
-    ...(shopify ? { shopDomain: shopify.shopDomain, shopifyApiVersion: shopify.apiVersion } : {}),
+    ...(shopify
+      ? {
+          shopDomain: shopify.shopDomain,
+          shopifyApiVersion: shopify.apiVersion,
+          // Which mechanism is in use, never the credential itself.
+          shopifyAuth: shopify.accessToken ? "static-token" : "client-credentials",
+        }
+      : {}),
   };
 }
 

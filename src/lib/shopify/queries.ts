@@ -8,8 +8,15 @@
  * trip and leaves the bucket healthy.
  */
 
-export const PRODUCTS_PER_PAGE = 50;
-export const VARIANTS_PER_PAGE = 100;
+import { env } from "../env";
+
+/**
+ * Defaults are the production values; both are overridable by environment so a
+ * controlled run can make pagination observable without shipping a smaller page
+ * size. See src/lib/env.ts.
+ */
+export const PRODUCTS_PER_PAGE = env.shopifyProductsPerPage;
+export const VARIANTS_PER_PAGE = env.shopifyVariantsPerPage;
 export const IMAGES_PER_PRODUCT = 50;
 
 /**
