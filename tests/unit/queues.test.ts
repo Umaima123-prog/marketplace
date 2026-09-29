@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildJobId, shortDigest } from "@/src/lib/queues";
+import { buildJobId, JOB, QUEUE, shortDigest, submitOrderJobId } from "@/src/lib/queues";
 
 describe("buildJobId", () => {
   it("never emits a colon -- BullMQ rejects a custom id containing one", () => {
@@ -48,5 +48,42 @@ describe("shortDigest", () => {
     expect(shortDigest(null)).toBe("start");
     expect(shortDigest(undefined)).toBe("start");
     expect(shortDigest("")).toBe("start");
+  });
+});
+
+describe("submitOrderJobId", () => {
+  it("never contains a colon", () => {
+    // BullMQ rejects a custom job id containing ":" outright -- it is the Redis
+    // key separator. This cost a full debugging session once already, on ids
+    // built from Shopify GIDs.
+    expect(submitOrderJobId("cm4abc123")).not.toContain(":");
+    expect(submitOrderJobId("gid://shopify/Order/12345")).not.toContain(":");
+  });
+
+  it("is deterministic, which is what makes it a duplicate guard", () => {
+    // One order, one job id, forever: the checkout request and a recovery sweep
+    // must compute the same id or they will each enqueue a submission and Shopify
+    // will receive two drafts for one COD order.
+    expect(submitOrderJobId("cm4abc123")).toBe(submitOrderJobId("cm4abc123"));
+  });
+
+  it("distinguishes different orders", () => {
+    expect(submitOrderJobId("cm4abc123")).not.toBe(submitOrderJobId("cm4abc124"));
+  });
+
+  it("is id-safe for any characters an id could contain", () => {
+    expect(submitOrderJobId("a b/c:d")).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+});
+
+describe("queue and job names", () => {
+  it("names the submit-order queue and job", () => {
+    expect(QUEUE.SUBMIT_ORDER).toBe("submit-order");
+    expect(JOB.SUBMIT_ORDER).toBe("submit-order");
+  });
+
+  it("keeps every queue name distinct", () => {
+    const names = Object.values(QUEUE);
+    expect(new Set(names).size).toBe(names.length);
   });
 });

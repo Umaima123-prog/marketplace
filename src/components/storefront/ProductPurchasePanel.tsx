@@ -1,7 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 
+import { useCart } from "@/src/components/cart/CartProvider";
+import { MAX_LINE_QUANTITY } from "@/src/lib/cart/cart-state";
 import { formatMoney } from "@/src/lib/money";
 import type { ProductDetailView, VariantView } from "@/src/server/catalog/catalog.service";
 
@@ -27,6 +30,10 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
 
   const [selectedId, setSelectedId] = useState<string | undefined>(initial?.id);
   const [imageIndex, setImageIndex] = useState(0);
+  const [quantity, setQuantity] = useState(1);
+  const [added, setAdded] = useState(false);
+
+  const { add } = useCart();
 
   const selected: VariantView | undefined =
     product.variants.find((variant) => variant.id === selectedId) ?? initial;
@@ -128,23 +135,57 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
 
             {selected.sku ? <p className="text-muted small">SKU: {selected.sku}</p> : null}
 
+            <div className="form-group">
+              <label className="font-weight-bold" htmlFor="quantity-input">
+                Quantity
+              </label>
+              <input
+                id="quantity-input"
+                type="number"
+                className="form-control"
+                min={1}
+                max={MAX_LINE_QUANTITY}
+                step={1}
+                value={quantity}
+                onChange={(event) => {
+                  const next = Number.parseInt(event.target.value, 10);
+                  if (Number.isNaN(next)) return;
+                  setQuantity(Math.min(Math.max(next, 1), MAX_LINE_QUANTITY));
+                }}
+              />
+            </div>
+
             {/*
-              UI only for this phase. It is disabled when the variant cannot be
-              bought, and it deliberately does nothing yet -- a button that
-              pretends to add to a cart that does not exist is worse than one
-              that is honest about the phase it is in.
+              Adds the VARIANT ID and the quantity to the cart, and nothing else
+              -- not the price rendered above it. That price is display only; the
+              cart page and the checkout each re-read it from MySQL.
+
+              `available` came from the server too, so this button being enabled
+              is a hint, not a guarantee: the server checks stock again at
+              checkout, because between this render and that request the stock can
+              go to zero.
             */}
             <button
               type="button"
               className="btn btn-primary btn-lg btn-block"
               disabled={!selected.available}
-              title="Cart is not implemented yet"
+              onClick={() => {
+                add(selected.id, quantity);
+                setAdded(true);
+              }}
             >
               Add to cart
             </button>
-            <p className="text-muted small mt-2 mb-0">
-              Cart and checkout arrive in the next phase.
-            </p>
+
+            {added ? (
+              <p className="text-success small mt-2 mb-0">
+                Added to your cart. <Link href="/cart">View cart</Link>
+              </p>
+            ) : (
+              <p className="text-muted small mt-2 mb-0">
+                Pay in cash when your order is delivered.
+              </p>
+            )}
           </>
         ) : (
           <div className="alert alert-secondary mb-0">

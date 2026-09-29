@@ -377,8 +377,9 @@ would be 1:1 with the order, carry one event type, and add a whole class of
 
 #### Known production gap — concurrent-checkout oversell
 
-Inventory is **re-read and validated server-side**, but **not reserved**. Two consequences, both
-accepted for this exercise and stated rather than hidden:
+Inventory is **re-read and validated server-side**, but **not reserved** -- Phase 4 ships this
+knowingly: there is no `reservedQuantity` column, no row lock and no reservation table. Two
+consequences, both accepted for this exercise and stated rather than hidden:
 
 - **Concurrent checkouts race.** Two requests for the last unit can both read `inventoryQuantity = 1`,
   both pass validation, and both commit. The check is *read-then-act* with no lock, so it narrows the
@@ -398,6 +399,106 @@ and explicitly excluded from what the periodic catalog sync is allowed to overwr
 complete subsystem with its own lifecycle and its own reconciliation job — deliberately out of scope
 here, because a half-built reservation counter that silently drifts is worse than an honest
 documented race.
+
+### 4.1b Phase 4 as implemented (cart + COD checkout)
+
+Shopify submission is **not** part of this phase: no order reaches the Admin API yet, and no webhook
+is consumed. What exists is the complete local path from "add to cart" to a committed `PENDING_SYNC`
+order with a job waiting on the queue.
+
+| Concern | File |
+|---|---|
+| Cart rules (pure: no React, no storage) | `src/lib/cart/cart-state.ts` |
+| Wire types + the purchasability rule | `src/lib/cart/cart-view.ts` |
+| Cart state in the browser | `src/components/cart/CartProvider.tsx` |
+| Hydration hook | `src/components/cart/useHydratedCart.ts` |
+| Cart page / navbar badge | `src/components/cart/CartView.tsx`, `CartBadge.tsx` |
+| Hydration from MySQL | `src/server/cart/cart.service.ts`, `app/api/cart/hydrate/route.ts` |
+| Request schema (no money field exists) | `src/server/checkout/checkout.schema.ts` |
+| Request fingerprint | `src/server/checkout/fingerprint.ts` |
+| Checkout decision + write | `src/server/checkout/checkout.service.ts` |
+| HTTP entry point | `app/api/checkout/route.ts` |
+| Checkout form / confirmation | `src/components/checkout/CheckoutForm.tsx`, `app/orders/[publicToken]/page.tsx` |
+| Queue definition | `src/lib/queues.ts` (`QUEUE.SUBMIT_ORDER`, `enqueueSubmitOrder`) |
+
+**Cart state.** `localStorage` key `marketplace.cart.v1`, holding exactly
+`{ lines: [{ variantId, quantity }] }`. No price, no title, no availability -- not even as a cache,
+because a cached price is a second answer to "what does this cost" and the wrong one would be the one
+the customer saw. `serializeCart` writes only those two fields whatever the in-memory object holds,
+and `parseCart` treats storage as hostile input: bad JSON, a previous format, an injected `price` key
+or 10 000 lines all degrade to a valid cart rather than throwing on first paint. Read through
+`useSyncExternalStore`, so cross-tab edits and same-tab writes converge on one value and there is no
+second copy in React state to drift from it.
+
+**Display vs decision.** `hydrateCart` (cart page, checkout summary) and `placeOrder` (the write) each
+re-read every variant from MySQL. They share one rule -- `evaluateLine` in `cart-view.ts` -- because
+two implementations of "can this be bought" would eventually disagree and the customer would be shown
+the wrong one. What they do with the answer differs: hydration marks the line and drops it from the
+subtotal; checkout refuses the whole order.
+
+**The browser cannot express a price.** `checkoutSchema` is `.strict()` and has no money field at all,
+so `price`, `subtotal` or `grandTotal` in a request is a `400`, not a silently dropped key. That is
+deliberately louder than stripping: a stripped field is invisible until the day someone wires
+`input.price` into the `Order.create` call.
+
+**Duplicate lines are rejected at the edge.** `OrderItem` is `UNIQUE (orderId, shopifyVariantId)`, so a
+payload naming one variant twice would fail inside the transaction with a `P2002` indistinguishable
+from an idempotency race. The schema refuses it instead, keeping that error in the request where it
+belongs.
+
+**Idempotency, as built.** `placeOrder` looks up `idempotencyKey` first and compares
+`requestFingerprint` **before** returning anything: a match replays the stored order, a mismatch is
+`409` and never hands back the other request's data. That lookup only narrows the window -- when two
+identical requests race, both pass it and `UNIQUE(idempotencyKey)` decides. The loser catches `P2002`,
+re-reads the winner, re-checks the fingerprint and replays it. Five concurrent identical requests
+produce one order; that is an integration test, not an assumption.
+
+**Queue handoff.** Enqueueing is injected into `placeOrder` (`deps.enqueueSubmit`) rather than
+imported, which makes the ordering testable: the test's enqueuer reads the order back on a *second
+connection*, so "visible" proves the transaction committed first. A replayed request does not enqueue
+again. A refused cart enqueues nothing.
+
+`enqueueSubmitOrder` uses a **fixed `jobId`** (`order--<orderId>`), the opposite of
+`enqueueProductSync`'s `deduplication` key, and for the opposite reason: a fixed id deduplicates
+against retained *completed and failed* jobs too. That was a bug for a manual sync trigger (3.6) and
+is exactly the property wanted here -- the checkout request, a retry of it and the recovery sweep
+cannot between them produce two submissions for one order. Recovering an order whose job reached a
+terminal state therefore needs `replaceExisting: true`, which only the sweeper passes; the checkout
+path cannot displace an in-flight submission.
+
+**If the enqueue fails** (Redis down), the customer's order still succeeds. It is committed and
+`PENDING_SYNC`, which *is* the outbox, and the recovery strategy is the sweep described in 4.1:
+re-enqueue `PENDING_SYNC` orders older than a grace interval, with the same `jobId`. Failing the
+request instead would invite a browser retry, and a retry with a fresh idempotency key would place a
+**second order for one delivery** -- strictly worse than a submission delayed by minutes. Tested:
+order present, status `PENDING_SYNC`, `submissionKey` set, `shopifyDraftOrderId` null, and the retry
+replays instead of duplicating.
+
+**Confirmation pages are addressed by `publicToken`**, 24 random bytes base64url, never by `reference`
+or `id`. The reference is short and spoken aloud during support calls, so it is guessable by design;
+if it addressed this page the order table would be enumerable. The page shows first name, city,
+country, totals and line items -- no phone, no email, no street address, because anyone holding the
+link can open it. An unknown token and someone else's token are the same `404`.
+
+**PII in logs.** Checkout logs `event`, `orderId`, `itemCount`, `status` and `durationMs`. It never
+logs the request body, the address, the phone number or the email; the route handler does not log the
+body either. `REDACT_PATHS` in `src/lib/logger.ts` is the backstop for the day someone logs a whole
+`Order` row while debugging, and now covers `city`, `province` and `postalCode` too -- a city plus a
+postal code plus a name identifies a household. Exercised by `tests/unit/logger-redaction.test.ts`
+against a real pino instance rather than asserted as configuration.
+
+#### 4.1c Phase 4 known gaps
+
+| # | Gap | Why it is acceptable now |
+|---|---|---|
+| C1 | **No inventory reservation.** Two simultaneous checkouts for the last unit can both succeed. | Documented above and in 9.1; a half-built reservation counter that drifts is worse than an honest race. This is the largest known correctness gap in the project and it is deliberate. |
+| C2 | **The `PENDING_SYNC` recovery sweep is not implemented yet.** An order whose enqueue failed stays `PENDING_SYNC` until something re-enqueues it. | The submit-order worker phase owns it; everything it needs (the `[status, createdAt]` index, the stable `jobId`, `replaceExisting`) is already in place, and no order is lost meanwhile. |
+| C3 | **No submit-order worker.** Jobs accumulate on the queue and are never consumed. | Intentional phase boundary -- the local order path is reviewable on its own. |
+| C4 | **No rate limit on `POST /api/checkout`.** A script can create orders as fast as it can invent addresses. | Guest checkout has no account, so there is no cheap identity to limit on; a real deployment limits at the edge. Order creation is bounded by real stock and every order is visible to an operator. |
+| C5 | **No retention or erasure policy for order PII.** Rows keep name, phone and address indefinitely. | Recorded in 8 as unimplemented; it is a data-lifecycle feature, not a checkout one. |
+| C6 | **No UI component tests.** Cart and checkout components are covered only through their pure logic and their server endpoints. | No component-test harness exists in this project (`npm test` is a Node-environment Vitest config with no DOM), and adding one is its own decision. The rules worth protecting live in `cart-state.ts`, `cart-view.ts` and the services, and those are tested directly. |
+| C7 | **The cart needs a round trip before it can show prices.** A cold cart page renders a loading line first. | The alternative is trusting stored prices. The trade is deliberate and the loading state is one line of text. |
+| C8 | **A stale summary can disagree with the order actually placed.** The customer may have seen 19.99 and be charged 24.50. | The server's re-read wins by design, and a line that became unsellable returns `409 cart_invalid` with the form stating that nothing was ordered. A price that merely changed is not blocked; the confirmation page shows the authoritative total. |
 
 ### 4.2 Submission job — two-phase draft order
 

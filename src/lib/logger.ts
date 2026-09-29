@@ -19,7 +19,7 @@ import { env } from "./env";
  * `censor` is a fixed string rather than removal so the shape of the object is
  * preserved in the output; a missing key looks like a code path that did not run.
  */
-const REDACT_PATHS = [
+export const REDACT_PATHS = [
   // Shopify credentials, however they are nested.
   "token",
   "accessToken",
@@ -35,20 +35,29 @@ const REDACT_PATHS = [
   "*.password",
   "secret",
   "*.secret",
-  // Customer PII. No order is logged in this phase, but the paths exist before
-  // the order code does, so the first order log line is already covered.
+  // Customer PII. Checkout logs an order id, an item count and a duration and
+  // nothing else (ARCHITECTURE §8) -- these paths are the backstop for the day
+  // someone logs a whole Order row while debugging. The delivery address is
+  // covered field by field, including the parts that look harmless alone: a city
+  // plus a postal code plus a name identifies a household.
   "customerName",
   "customerPhone",
   "customerEmail",
   "customerNote",
   "addressLine1",
   "addressLine2",
+  "city",
+  "province",
+  "postalCode",
   "*.customerName",
   "*.customerPhone",
   "*.customerEmail",
   "*.customerNote",
   "*.addressLine1",
   "*.addressLine2",
+  "*.city",
+  "*.province",
+  "*.postalCode",
 ];
 
 /**

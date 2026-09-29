@@ -28,10 +28,10 @@ export function ProductCard({ product }: { product: ProductCardView }) {
         instead of letting one card collapse.
       */}
       {product.image ? (
-        // eslint-disable-next-line @next/next/no-img-element -- Shopify CDN hosts
-        // these at arbitrary remote paths; next/image would need every CDN host
-        // allow-listed in next.config, which is configuration this phase does
-        // not own.
+        // Shopify's CDN hosts these at arbitrary remote paths; next/image would
+        // need every CDN host allow-listed in next.config, which is
+        // configuration this phase does not own.
+        // eslint-disable-next-line @next/next/no-img-element
         <img
           src={product.image.url}
           alt={product.image.altText ?? product.title}

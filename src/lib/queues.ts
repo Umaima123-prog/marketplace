@@ -48,12 +48,14 @@ export const QUEUE = {
   PRODUCT_SYNC: "product-sync",
   PRODUCT_SYNC_PAGE: "product-sync-page",
   VARIANT_SYNC: "variant-sync",
+  SUBMIT_ORDER: "submit-order",
 } as const;
 
 export const JOB = {
   SYNC_PRODUCTS: "sync-products",
   SYNC_PRODUCTS_PAGE: "sync-products-page",
   SYNC_VARIANTS: "sync-variants",
+  SUBMIT_ORDER: "submit-order",
 } as const;
 
 export type SyncMode = "FULL" | "INCREMENTAL";
@@ -70,6 +72,14 @@ export interface ProductSyncPagePayload {
   syncRunId: string;
   cursor: string | null;
   pageIndex: number;
+}
+
+/**
+ * Submit one local order to Shopify. ID only: the order row holds the address,
+ * the phone number and the totals, and none of that belongs in Redis (§8).
+ */
+export interface SubmitOrderPayload {
+  orderId: string;
 }
 
 /** Only for products whose variant connection exceeded one page. */
@@ -114,9 +124,24 @@ export const PAGE_JOB_OPTIONS: JobsOptions = {
 
 export const VARIANT_JOB_OPTIONS: JobsOptions = { ...PAGE_JOB_OPTIONS };
 
+/**
+ * Order submission: 5 attempts, 10s base (10s, 20s, 40s, 80s).
+ *
+ * Failures are kept much longer than a sync's. A failed sync is repaired by the
+ * next sync; a failed submission is a customer who is expecting a delivery, so
+ * the job must still be inspectable days later.
+ */
+export const SUBMIT_ORDER_JOB_OPTIONS: JobsOptions = {
+  attempts: 5,
+  backoff: { type: "exponential", delay: 10_000 },
+  removeOnComplete: { age: 7 * 24 * 3600, count: 5_000 },
+  removeOnFail: { age: 30 * 24 * 3600, count: 10_000 },
+};
+
 let productSyncQueue: Queue<ProductSyncPayload> | undefined;
 let productSyncPageQueue: Queue<ProductSyncPagePayload> | undefined;
 let variantSyncQueue: Queue<VariantSyncPayload> | undefined;
+let submitOrderQueue: Queue<SubmitOrderPayload> | undefined;
 
 export function getProductSyncQueue(): Queue<ProductSyncPayload> {
   productSyncQueue ??= new Queue<ProductSyncPayload>(QUEUE.PRODUCT_SYNC, {
@@ -140,6 +165,54 @@ export function getVariantSyncQueue(): Queue<VariantSyncPayload> {
     defaultJobOptions: VARIANT_JOB_OPTIONS,
   });
   return variantSyncQueue;
+}
+
+export function getSubmitOrderQueue(): Queue<SubmitOrderPayload> {
+  submitOrderQueue ??= new Queue<SubmitOrderPayload>(QUEUE.SUBMIT_ORDER, {
+    connection: getQueueConnection(),
+    defaultJobOptions: SUBMIT_ORDER_JOB_OPTIONS,
+  });
+  return submitOrderQueue;
+}
+
+/** The job id for an order's submission. One order, one id, forever. */
+export function submitOrderJobId(orderId: string): string {
+  return buildJobId("order", orderId);
+}
+
+/**
+ * Enqueue the submission for exactly one order.
+ *
+ * A FIXED job id here, not a `deduplication` key -- the opposite choice from
+ * `enqueueProductSync`, and for the opposite reason. A fixed id is deduplicated
+ * against retained COMPLETED and FAILED jobs as well as waiting ones, which is a
+ * bug for a manual sync trigger and precisely the property wanted here: whatever
+ * calls this -- the checkout request, a retry of it, or the PENDING_SYNC sweeper
+ * -- at most one submit job can exist per order for the whole retention window.
+ * Two jobs would mean two Shopify drafts for one COD order.
+ *
+ * `replaceExisting` is for the sweeper: a job that reached a terminal state still
+ * holds the id, so recovering an order whose job failed permanently means
+ * removing the old job first. Deliberately explicit -- the checkout path never
+ * passes it, so the checkout path can never displace an in-flight submission.
+ */
+export async function enqueueSubmitOrder(
+  orderId: string,
+  options: { replaceExisting?: boolean } = {},
+): Promise<EnqueueResult> {
+  const queue = getSubmitOrderQueue();
+  const jobId = submitOrderJobId(orderId);
+
+  if (options.replaceExisting) {
+    // Removes only a job in a terminal state; BullMQ refuses to remove one that
+    // is currently active, which is the safe outcome.
+    await queue.remove(jobId).catch(() => undefined);
+  }
+
+  const job = await queue.add(JOB.SUBMIT_ORDER, { orderId }, { jobId });
+
+  // BullMQ returns a job whose id is undefined when a duplicate was suppressed.
+  return { jobId: job.id, enqueued: job.id === jobId };
 }
 
 /** How long two identical manual triggers are treated as one. */

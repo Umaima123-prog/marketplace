@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import { CartProvider } from "@/src/components/cart/CartProvider";
+
 // Order matters: Bootstrap, then AdminLTE's overrides, then ours.
 // AdminLTE is vendored (vendor/adminlte/adminlte.min.css) rather than installed
 // -- see the header of that file for why.
@@ -21,7 +23,15 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         the right shape for a storefront, where a shopper has one catalog to
         browse and nothing to navigate between.
       */}
-      <body className="layout-top-nav">{children}</body>
+      <body className="layout-top-nav">
+        {/*
+          The cart provider wraps the whole app because two things far apart in
+          the tree need it: the navbar's item count and the cart page itself.
+          It is a client component holding localStorage state; everything inside
+          it stays a server component unless it says otherwise.
+        */}
+        <CartProvider>{children}</CartProvider>
+      </body>
     </html>
   );
 }

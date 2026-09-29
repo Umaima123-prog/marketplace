@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { CartBadge } from "@/src/components/cart/CartBadge";
+
 /**
  * AdminLTE's navbar, expressed as JSX.
  *
@@ -28,12 +30,17 @@ export function Navbar() {
       </ul>
 
       <ul className="navbar-nav ml-auto">
-        <li className="nav-item">
+        <li className="nav-item d-none d-sm-inline-block">
           {/*
             Cash on delivery is the only payment method (ARCHITECTURE §4), so it
             is stated in the chrome rather than discovered at checkout.
           */}
           <span className="nav-link text-muted">Cash on delivery</span>
+        </li>
+        <li className="nav-item">
+          {/* The only client component in the navbar: the count lives in the
+              shopper's browser, so the server cannot render it. */}
+          <CartBadge />
         </li>
       </ul>
     </nav>
