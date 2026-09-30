@@ -50,6 +50,11 @@ export interface UpsertProductResult {
   applied: boolean;
   variantsUpserted: number;
   imagesUpserted: number;
+  /**
+   * Variants Shopify no longer reports for this product, deactivated by this
+   * upsert. Always 0 while the product's variant pagination is incomplete.
+   */
+  variantsDeactivated: number;
 }
 
 /**
@@ -84,7 +89,13 @@ export async function upsertProduct(
       { shopifyProductId: mapped.shopifyProductId, outcome: "skipped_stale" },
       "skipped stale product payload",
     );
-    return { productId: existing.id, applied: false, variantsUpserted: 0, imagesUpserted: 0 };
+    return {
+      productId: existing.id,
+      applied: false,
+      variantsUpserted: 0,
+      imagesUpserted: 0,
+      variantsDeactivated: 0,
+    };
   }
 
   const variantState = variantSyncState(mapped.variantsHasNextPage, mapped.variantsEndCursor);
@@ -137,9 +148,31 @@ export async function upsertProduct(
     log,
   });
 
+  // Only when this payload is the whole variant set -- see the function's comment.
+  // A paginated product is reconciled by nothing, which is the conservative choice.
+  const variantsDeactivated = variantState.variantSyncComplete
+    ? await deactivateMissingVariants(
+        db,
+        product.id,
+        mapped.variants.map((variant) => variant.shopifyVariantId),
+        now,
+      )
+    : 0;
+
+  if (variantsDeactivated > 0) {
+    log?.info(
+      {
+        shopifyProductId: mapped.shopifyProductId,
+        variantsDeactivated,
+        event: "variants_deactivated_missing",
+      },
+      "deactivated variants Shopify no longer reports for this product",
+    );
+  }
+
   const imagesUpserted = await reconcileImages(db, product.id, mapped.images);
 
-  return { productId: product.id, applied: true, variantsUpserted, imagesUpserted };
+  return { productId: product.id, applied: true, variantsUpserted, imagesUpserted, variantsDeactivated };
 }
 
 export async function upsertVariants(
@@ -227,6 +260,49 @@ export async function upsertVariants(
   }
 
   return count;
+}
+
+/**
+ * Deactivate variants that Shopify no longer reports for this product.
+ *
+ * Variants used to be upserted and never reconciled, so a variant DELETED in
+ * Shopify stayed `isActive = true` locally forever. That is not a cosmetic drift:
+ * the storefront would keep offering it, the checkout would accept it (it passes
+ * every condition in `evaluateLine` -- active variant, active product, stock on
+ * hand), and submission would then send Shopify a `variantId` that no longer
+ * exists. `draftOrderCreate` refuses that with a `userErrors` entry, which this
+ * project classifies as PERMANENT -- so the order would reach `FAILED` after the
+ * customer had already seen a confirmation page. Proven against the test database
+ * before this existed: a product synced with two variants and then with one kept
+ * both rows active.
+ *
+ * DEACTIVATED, never deleted. `OrderItem.variantId` may point at the row, and a
+ * catalog change must not reach into financial history; `ON DELETE SET NULL` would
+ * keep the order valid but lose the link for no benefit. `MISSING_FROM_SYNC` is the
+ * same reason the product-level sweep uses, because it is the same cause: gone
+ * upstream.
+ *
+ * ONLY safe when the payload is the product's COMPLETE variant set. A product whose
+ * variants span several pages arrives here with page 1 only, and reconciling against
+ * that would deactivate pages 2..n on every sync. Callers gate on
+ * `variantSyncComplete`; the >100-variant continuation chain never reconciles at all
+ * (S8 territory, and recorded as such).
+ */
+async function deactivateMissingVariants(
+  db: Db,
+  productId: string,
+  presentShopifyVariantIds: string[],
+  now: Date,
+): Promise<number> {
+  const result = await db.productVariant.updateMany({
+    where: {
+      productId,
+      isActive: true,
+      shopifyVariantId: { notIn: presentShopifyVariantIds },
+    },
+    data: { isActive: false, deactivatedAt: now, deactivationReason: "MISSING_FROM_SYNC" },
+  });
+  return result.count;
 }
 
 /**

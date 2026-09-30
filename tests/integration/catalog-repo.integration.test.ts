@@ -266,6 +266,189 @@ describe("variant create and upsert", () => {
   });
 });
 
+describe("variants removed in Shopify are reconciled", () => {
+  /**
+   * Variants used to be upserted and never reconciled, so a variant DELETED in
+   * Shopify stayed active locally forever. The storefront would keep offering it and
+   * the checkout would accept it -- it passes every condition in `evaluateLine` --
+   * and submission would then hand Shopify a `variantId` that no longer exists,
+   * which fails PERMANENTLY after the customer has seen a confirmation page.
+   *
+   * Deactivated rather than deleted: `OrderItem.variantId` may point at the row.
+   */
+
+  /** A product node carrying exactly these variant ids, with a movable timestamp. */
+  function withVariants(ids: string[], updatedAt: string, hasNextPage = false) {
+    return product({
+      updatedAt,
+      variants: {
+        pageInfo: { hasNextPage, endCursor: hasNextPage ? "cursor-1" : null },
+        nodes: ids.map((id, index) =>
+          variantNode({ id: `gid://shopify/ProductVariant/${id}`, sku: `SKU-${id}`, position: index + 1 }),
+        ),
+      },
+    });
+  }
+
+  it("deactivates a variant Shopify no longer reports", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariants(["A", "B"], "2026-09-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const before = await db.productVariant.findMany({ orderBy: { sku: "asc" } });
+    expect(before.map((v) => v.sku)).toEqual(["SKU-A", "SKU-B"]);
+    expect(before.every((v) => v.isActive)).toBe(true);
+
+    // B has been deleted upstream. The product itself is unchanged and still ACTIVE.
+    const result = await upsertProduct(db, withVariants(["A"], "2026-10-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    expect(result.variantsDeactivated).toBe(1);
+
+    const after = await db.productVariant.findMany({ orderBy: { sku: "asc" } });
+    // Not deleted: the row survives so OrderItem.variantId keeps pointing at it.
+    expect(after.map((v) => v.sku)).toEqual(["SKU-A", "SKU-B"]);
+
+    const gone = after.find((v) => v.sku === "SKU-B")!;
+    expect(gone.isActive).toBe(false);
+    expect(gone.deactivationReason).toBe("MISSING_FROM_SYNC");
+    expect(gone.deactivatedAt).not.toBeNull();
+  });
+
+  it("leaves the variants that are still present completely untouched", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariants(["A", "B"], "2026-09-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const before = await db.productVariant.findFirstOrThrow({ where: { sku: "SKU-A" } });
+
+    await upsertProduct(db, withVariants(["A"], "2026-10-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const after = await db.productVariant.findFirstOrThrow({ where: { sku: "SKU-A" } });
+    expect(after.isActive).toBe(true);
+    expect(after.deactivatedAt).toBeNull();
+    expect(after.deactivationReason).toBeNull();
+    // Price, stock and identity are the survivor's own and must not move.
+    expect(after.price.toString()).toBe(before.price.toString());
+    expect(after.inventoryQuantity).toBe(before.inventoryQuantity);
+    expect(after.title).toBe(before.title);
+    expect(after.id).toBe(before.id);
+  });
+
+  it("deactivates nothing while variant pagination is incomplete", async () => {
+    // The dangerous case. A >100-variant product arrives as page 1 only; reconciling
+    // against that payload would deactivate pages 2..n on every single sync.
+    const run = await createRun();
+    await upsertProduct(db, withVariants(["A", "B", "C"], "2026-09-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const result = await upsertProduct(
+      db,
+      withVariants(["A"], "2026-10-01T00:00:00Z", /* hasNextPage */ true),
+      { syncRunId: run.id, currencyCode: "PKR" },
+    );
+
+    expect(result.variantsDeactivated).toBe(0);
+
+    const after = await db.productVariant.findMany({ orderBy: { sku: "asc" } });
+    expect(after.every((v) => v.isActive)).toBe(true);
+    // And the product is correctly marked as mid-chain.
+    const p = await db.product.findFirstOrThrow();
+    expect(p.variantSyncComplete).toBe(false);
+  });
+
+  it("reconciles once pagination completes", async () => {
+    // The other half of the gate: when the chain finishes and the payload is whole,
+    // the missing variant must finally be deactivated.
+    const run = await createRun();
+    await upsertProduct(db, withVariants(["A", "B"], "2026-09-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+    await upsertProduct(db, withVariants(["A"], "2026-10-01T00:00:00Z", true), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+    expect((await db.productVariant.findMany()).every((v) => v.isActive)).toBe(true);
+
+    const result = await upsertProduct(db, withVariants(["A"], "2026-10-02T00:00:00Z", false), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    expect(result.variantsDeactivated).toBe(1);
+    expect((await db.productVariant.findFirstOrThrow({ where: { sku: "SKU-B" } })).isActive).toBe(false);
+  });
+
+  it("keeps an OrderItem's link to a deactivated variant", async () => {
+    // Why deactivate instead of delete: a variant that has been ordered is still
+    // referenced by financial history.
+    const run = await createRun();
+    await upsertProduct(db, withVariants(["A", "B"], "2026-09-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+    const ordered = await db.productVariant.findFirstOrThrow({ where: { sku: "SKU-B" } });
+
+    await db.order.create({
+      data: {
+        reference: "COD-RECONCILE",
+        publicToken: "token-reconcile-xxxxxxxxxxxx",
+        idempotencyKey: "key-reconcile-0000000000",
+        requestFingerprint: "f".repeat(64),
+        submissionKey: "submission-reconcile",
+        status: "SYNCED",
+        paymentMethod: "COD",
+        currencyCode: "PKR",
+        subtotal: "10.00",
+        grandTotal: "10.00",
+        customerName: "Test Person",
+        customerPhone: "+920000000000",
+        addressLine1: "1 Test Road",
+        city: "Testville",
+        countryCode: "PK",
+        items: {
+          create: [
+            {
+              variantId: ordered.id,
+              shopifyVariantId: ordered.shopifyVariantId,
+              shopifyProductId: "gid://shopify/Product/1",
+              productTitle: "Test",
+              variantTitle: ordered.title,
+              sku: ordered.sku,
+              unitPrice: "10.00",
+              quantity: 1,
+              lineTotal: "10.00",
+            },
+          ],
+        },
+      },
+    });
+
+    await upsertProduct(db, withVariants(["A"], "2026-10-01T00:00:00Z"), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const item = await db.orderItem.findFirstOrThrow();
+    // The link survives, and so do the snapshots that make the order readable.
+    expect(item.variantId).toBe(ordered.id);
+    expect(item.sku).toBe(ordered.sku);
+    expect(item.unitPrice.toString()).toBe("10");
+  });
+});
+
 describe("variant visibility follows the parent product", () => {
   /**
    * The invariant: `Product.isActive = false` implies every one of its variants is

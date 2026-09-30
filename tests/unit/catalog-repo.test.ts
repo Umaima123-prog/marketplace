@@ -87,6 +87,7 @@ function fakeDb(options: FakeOptions = {}) {
     variantUpsert: 0,
     imageDeleteMany: 0,
     productUpdateData: [] as unknown[],
+    variantDeactivateWhere: [] as unknown[],
   };
 
   const db = {
@@ -110,6 +111,14 @@ function fakeDb(options: FakeOptions = {}) {
         return { id: "var-1" };
       }),
       update: vi.fn().mockResolvedValue({ id: "var-1" }),
+      // Used by the reconcile that deactivates variants Shopify no longer reports.
+      // Recorded so a test can assert whether reconciliation ran and what it
+      // targeted; the real behaviour is covered against MySQL in the integration
+      // suite, since it is a `notIn` query.
+      updateMany: vi.fn(async (args: { where: unknown }) => {
+        calls.variantDeactivateWhere.push(args.where);
+        return { count: 0 };
+      }),
     },
     productImage: {
       upsert: vi.fn().mockResolvedValue({ id: "img-1" }),
