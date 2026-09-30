@@ -2,6 +2,12 @@
 
 A reviewer's guide: what this is, what to run, where to look, and what is deliberately missing.
 
+**Demo video:** <https://www.loom.com/share/02fc3b42859640d9b1428029c730b425>
+
+The walkthrough is the fastest way to see the system working end to end. Everything it shows is
+reproducible from this repository — the figures and the flows are recorded in
+[VERIFICATION.md](VERIFICATION.md).
+
 ## What was built
 
 A Next.js storefront selling a Shopify catalog **cash on delivery**, with MySQL as the
@@ -26,7 +32,8 @@ storefront's source of truth and a separate worker process owning every Shopify 
 | `npm run typecheck` | clean |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean |
-| Real end-to-end Shopify COD order | **1 verified** — local `SYNCED`, one draft, one order, Shopify `displayFinancialStatus: PENDING` with the full amount outstanding, totals matching to the cent, no duplicates |
+| Real end-to-end Shopify COD orders | **2 verified** — one from the controlled Phase 5 test, one from a manual storefront checkout. Each is `SYNCED` locally with one draft and one Shopify order, `displayFinancialStatus: PENDING` with the full amount outstanding, totals matching to the cent, no duplicates |
+| Demo video | <https://www.loom.com/share/02fc3b42859640d9b1428029c730b425> |
 
 Details, including what was *not* verified live, are in [VERIFICATION.md](VERIFICATION.md).
 

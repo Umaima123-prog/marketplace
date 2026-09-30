@@ -6,6 +6,10 @@ never by live data, this document says so rather than implying otherwise.
 
 Last run: all five checks below, plus the live order in §4.
 
+A recorded walkthrough of the working system is linked from
+[SUBMISSION.md](SUBMISSION.md): <https://www.loom.com/share/02fc3b42859640d9b1428029c730b425>. It is a demonstration, not evidence — every claim in
+this document comes from running the command or query shown, not from the video.
+
 ## 1. The five checks
 
 | Command | Result |
