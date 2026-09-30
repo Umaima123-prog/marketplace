@@ -183,7 +183,7 @@ hardcoded in the storefront and no sync code changed for them.
 |---|---|
 | 10 electronics products storefront-visible | `isActive = true AND status = ACTIVE` count is 10; the listing renders 10 cards |
 | 19 variants active | 19 / 19 active, none carrying a `deactivationReason` |
-| Prices, SKUs, inventory | verified row by row against the specification; inventory total 501, 19 / 19 SKUs present |
+| Prices, SKUs, inventory | verified row by row against the specification; 19 / 19 SKUs present; inventory total **500** — 501 as created, less one unit of `ELS-GRY` sold by the storefront order below |
 | All 10 have a working image | 10 `ProductImage` rows, one per product, `position 1`, `https://cdn.shopify.com/…`; one URL fetched directly → HTTP 200, `image/png`, 1,349,958 bytes |
 | Listing renders images | 10 CDN `<img>` sources, **0** "No image" placeholders (10 before the upload) |
 | A detail page renders its image | `/products/axis-smartwatch` 200, one gallery image, no placeholder, no thumbnail strip (single image) |
@@ -193,9 +193,23 @@ hardcoded in the storefront and no sync code changed for them.
 | Old seed variants inactive | 26 / 26 inactive, all `deactivationReason = SHOPIFY_STATUS`; 0 variants active under an inactive product |
 | Archived products absent from the storefront | 0 occurrences of `Snowboard`, `Gift Card` or `Ski Wax` on the listing; three archived detail pages 404 |
 | Storefront still reads only MySQL | the web process log contains 0 Shopify references across every page load and API call; no storefront, cart, checkout or route module imports the Shopify client |
-| The historical live COD order remains valid | still one order, `SYNCED`, with its draft and order ids and its price snapshots intact — archiving the product it references changed nothing about it |
+| The historical live COD order remains valid | `SYNCED`, with its draft and order ids and its price snapshots intact — archiving the product it references changed nothing about it. It is no longer the only order; see below |
 
-No order was placed during the catalog migration.
+No order was placed *during* the catalog migration itself.
+
+**A second real order has since been placed through the storefront**, unprompted, on the new
+catalog: 1 x Elevate Laptop Stand (`ELS-GRY`) for 34.99 USD, `SYNCED` locally on its **first**
+attempt, and `PENDING` / unpaid in Shopify. Its idempotency key is a browser-minted UUID from
+`CheckoutForm` and its customer details are not the synthetic fixture used in §4, so it came from
+the storefront UI rather than from any script here.
+
+Current order state: **2 local orders, 2 Shopify orders**, one-to-one, both `SYNCED` locally and
+both `PENDING` / unpaid in Shopify. One is the controlled test of §4; the other is the storefront
+order described here. Nothing was created accidentally — no checkout request was issued by any
+verification script after §4, and this order predates the branding work that followed it.
+
+That order is also the only end-to-end evidence for the **electronics** catalog: §4's controlled
+test ran against a product from the old seed catalog.
 
 ## 6. What has NOT been verified live
 

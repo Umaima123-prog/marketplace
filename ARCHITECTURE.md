@@ -354,7 +354,7 @@ storefront, and no sync code changed to accommodate them.
 | Storefront-visible products (`isActive AND status = ACTIVE`) | **10** |
 | Active variants across them | **19** |
 | Products with at least one synced image | **10 / 10** (one image each, Shopify CDN) |
-| Inventory total across the 19 variants | **501** |
+| Inventory total across the 19 variants | **500** (501 as created, less one unit sold by a real storefront order) |
 | Former seed products | **archived in Shopify**, retained locally as inactive rows |
 | Former seed variants | **26, all inactive** (`deactivationReason = SHOPIFY_STATUS`) |
 
