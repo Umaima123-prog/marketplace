@@ -356,13 +356,16 @@ Honest list; the full set with reasoning lives in `ARCHITECTURE.md` (§3.7, §3a
 - **Shopify cost pacing is process-local (S2).** Two worker processes would each pace against
   their own partial view of a per-shop budget. Running more than one needs a shared limiter, not
   a larger concurrency number.
-- **Nested variant pagination has never run against live data (S8).** The development store's
-  largest variant set is 5, so the >100-variant chain is covered by automated tests only.
+- **Nested variant pagination has never run against live data (S8).** No product in the store comes
+  close to 100 variants — 5 at most in the archived seed catalog, 2 in the current one — so the
+  >100-variant chain is covered by automated tests only.
 - **Keyset pagination beyond page 1 was exercised with a reduced page size (F5)**, not with a
-  catalog large enough to need it.
+  catalog large enough to need it — the current 10-product catalog fits one 24-card page.
 - **Publication state is not synced (F6).** A product that is `ACTIVE` in Shopify but unpublished
   from the Online Store channel is still listed here. Documented as a scope decision rather than
-  patched with a storefront filter that would disagree with the data it reads.
+  patched with a storefront filter that would disagree with the data it reads. The seed product that
+  used to demonstrate this has been archived, so no live product shows it today — the gap itself is
+  unchanged.
 - `next/image` is bypassed (F2) and AdminLTE is vendored rather than installed (F3), both for
   reasons recorded in `ARCHITECTURE.md`.
 

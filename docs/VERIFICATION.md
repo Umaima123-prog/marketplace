@@ -11,7 +11,7 @@ Last run: all five checks below, plus the live order in §4.
 | Command | Result |
 |---|---|
 | `npm test` | **284 passed**, 19 files |
-| `npm run test:integration` | **179 passed**, 7 files (real MySQL + real Redis) |
+| `npm run test:integration` | **185 passed**, 7 files (real MySQL + real Redis) |
 | `npm run typecheck` | clean (`tsc --noEmit`, no output) |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean — 9 routes compiled |
@@ -55,7 +55,7 @@ Behaviours worth calling out, because they encode rules rather than mechanics:
 - the submission tag stays inside Shopify's 40-character limit for a real key **and** for any key
   the `VARCHAR(64)` column can hold
 
-## 3. Integration suite (179 tests, 7 files)
+## 3. Integration suite (185 tests, 7 files)
 
 Real MySQL for everything, and real Redis for the queue tests. Shopify is faked; the database is
 not — every claim in these tests is about what MySQL does under concurrent conditional updates,
@@ -157,6 +157,12 @@ still had no draft and no order id, and asserted the successful order intact aft
 
 ## 5. Earlier live verification (Phases 2–3)
 
+**These figures are historical and describe the Shopify demo seed catalog** — 17 products, 26
+variants, 18 images, 15 of them storefront-visible — which was in the store when Phases 2 and 3 were
+verified. That catalog has since been archived and replaced by a 10-product electronics catalog; the
+current state is in §5a. The evidence below is recorded as it happened and deliberately not restated
+against the new catalog.
+
 | Claim | Evidence |
 |---|---|
 | Shopify authentication | client-credentials exchange against the real store; scopes read back and logged |
@@ -167,12 +173,37 @@ still had no draft and no order id, and asserted the successful order intact aft
 | Storefront | 15 cards for 15 `ACTIVE` products; `ARCHIVED` and `DRAFT` absent and 404 on detail; all four gift-card variant prices in the delivered payload; image-less product renders a placeholder; unknown handle 404 |
 | Shopify independence | both storefront pages rendered with every Shopify credential blanked, and the server log contained no Shopify line |
 
+## 5a. Current catalog state (verified after the electronics migration)
+
+Distinct from §5: that section is historical, this one is the state of the system now. The 10
+products were created **in Shopify** and reached MySQL only through the existing sync — nothing is
+hardcoded in the storefront and no sync code changed for them.
+
+| Claim | Evidence |
+|---|---|
+| 10 electronics products storefront-visible | `isActive = true AND status = ACTIVE` count is 10; the listing renders 10 cards |
+| 19 variants active | 19 / 19 active, none carrying a `deactivationReason` |
+| Prices, SKUs, inventory | verified row by row against the specification; inventory total 501, 19 / 19 SKUs present |
+| All 10 have a working image | 10 `ProductImage` rows, one per product, `position 1`, `https://cdn.shopify.com/…`; one URL fetched directly → HTTP 200, `image/png`, 1,349,958 bytes |
+| Listing renders images | 10 CDN `<img>` sources, **0** "No image" placeholders (10 before the upload) |
+| A detail page renders its image | `/products/axis-smartwatch` 200, one gallery image, no placeholder, no thumbnail strip (single image) |
+| Variant switching | both variants' titles, prices and SKUs present in the delivered payload, so switching needs no request; a single-variant product shows no selector |
+| Cart hydration | two electronics lines priced from MySQL, subtotal `269.97 USD`, `checkoutable: true` |
+| Old seed products archived | 15 ACTIVE seed products archived in Shopify by handle; already-ARCHIVED and DRAFT ones untouched; **nothing deleted** |
+| Old seed variants inactive | 26 / 26 inactive, all `deactivationReason = SHOPIFY_STATUS`; 0 variants active under an inactive product |
+| Archived products absent from the storefront | 0 occurrences of `Snowboard`, `Gift Card` or `Ski Wax` on the listing; three archived detail pages 404 |
+| Storefront still reads only MySQL | the web process log contains 0 Shopify references across every page load and API call; no storefront, cart, checkout or route module imports the Shopify client |
+| The historical live COD order remains valid | still one order, `SYNCED`, with its draft and order ids and its price snapshots intact — archiving the product it references changed nothing about it |
+
+No order was placed during the catalog migration.
+
 ## 6. What has NOT been verified live
 
 Stated plainly, because the sections above are otherwise easy to over-read.
 
-- **Nested variant pagination (>100 variants)** — the development store's largest variant set is 5,
-  so no variant-sync chain has ever been enqueued against live data. Automated tests only (S8).
+- **Nested variant pagination (>100 variants)** — no product in the store comes close: 5 variants at
+  most in the archived seed catalog, 2 in the current one, so no variant-sync chain has ever been
+  enqueued against live data. Automated tests only (S8).
 - **Keyset pagination beyond page 1 at production page size** — exercised by lowering the page
   size to 5, not with a catalog large enough to need 50 (F5).
 - **A second worker process** — concurrency safety is proven within one process and by database

@@ -129,12 +129,16 @@ restarts from page 0. Chained page jobs lose **one page** to a crash.
 **Scope:** all catalog products are synced. The storefront shows only `status = ACTIVE` **and**
 `isActive = true`. No sales-channel publication filtering.
 
-**Consequence, observed live and left as-is:** the development store contains a product whose
-handle is `the-hidden-snowboard`. It is `ACTIVE` in Shopify, so the storefront lists it. "Hidden"
-there refers to sales-channel publication -- a product can be active yet unpublished to the Online
-Store -- and this project deliberately does not read publication state. Filtering it would need
-`publishedOnCurrentPublication` (or a `publications` query) in the sync, a column to store it, and
-a third condition in the storefront predicate.
+**Consequence, observed live and left as-is:** while the Shopify demo seed catalog was in place,
+the store contained a product with the handle `the-hidden-snowboard`. It was `ACTIVE` in Shopify, so
+the storefront listed it. "Hidden" there refers to sales-channel publication -- a product can be
+active yet unpublished to the Online Store -- and this project deliberately does not read publication
+state. Filtering it would need `publishedOnCurrentPublication` (or a `publications` query) in the
+sync, a column to store it, and a third condition in the storefront predicate.
+
+That product has since been archived along with the rest of the seed catalog, so **no live product
+demonstrates this today**. The gap itself is unchanged: nothing in the sync reads publication state,
+so an active-but-unpublished product would still be listed. Tracked as F6.
 
 That is a scope decision, not a defect, and it is stated here rather than quietly patched: a
 merchant who unpublishes a product from the Online Store while leaving it active will still see it
@@ -255,8 +259,13 @@ Shopify call -- not a larger concurrency number. Tracked as S2.
 
 ### 3.6d Live verification against the development store
 
-Run against `merchant-product-enrichment-hub.myshopify.com` (17 products, 26 variants,
-18 images), triggered through `POST /api/admin/sync` and processed by the separate worker.
+**Historical evidence, from Phase 2.** The figures below describe the Shopify demo seed catalog that
+was in the store at the time -- 17 products, 26 variants, 18 images. That catalog has since been
+archived and replaced; see 3a.2 for the current state. The runs are recorded as they happened and are
+not restated against the new catalog.
+
+Run against `merchant-product-enrichment-hub.myshopify.com`, triggered through
+`POST /api/admin/sync` and processed by the separate worker.
 
 | Run | Page size | Pages | Result |
 |---|---|---|---|
@@ -288,7 +297,7 @@ that `variantSyncComplete` flips to true only on `hasNextPage: false`. Creating 
 | S3 | **Images are hard-deleted on reconcile.** Correct today -- nothing references `ProductImage` -- but it is the one place the sync deletes rather than deactivates. | None now. | Accepted, noted so it is revisited if images ever get referenced. |
 | S4 | **`shopCurrency()` is cached per process for the worker's lifetime.** A shop that changes its currency mid-process keeps writing the old code until restart. | Vanishingly rare; wrong currency codes on variants written after the change. | Accepted. |
 | S5 | **A page abandoned because the run is no longer RUNNING returns success.** | **Closed.** The result now carries `abandoned: true` rather than looking like a completed page, and finalisation refuses to write a status onto a run it no longer owns. A page that permanently fails now ends the run itself (`failSyncRun`), because the chain is the run: no later page job would exist to finalise it. |
-| S8 | **Nested variant pagination has never run against live data.** The store's largest variant set is 5, so `variant-sync` has never been enqueued outside tests. | A defect in the continuation chain would not have been caught by any live run. | Open. Covered by unit tests; would need a 100+ variant product, or a temporarily lowered `SHOPIFY_VARIANTS_PER_PAGE`, to exercise for real. |
+| S8 | **Nested variant pagination has never run against live data.** No product in the store comes close to 100 variants -- 5 at most in the archived seed catalog, 2 in the current one -- so `variant-sync` has never been enqueued outside tests. | A defect in the continuation chain would not have been caught by any live run. | Open. Covered by unit tests; would need a 100+ variant product, or a temporarily lowered `SHOPIFY_VARIANTS_PER_PAGE`, to exercise for real. |
 | S6 | **No integration test against real MySQL.** | **Closed.** `npm run test:integration` runs 28 tests against a dedicated `marketplace_test` database: upserts, idempotency, DECIMAL round-trip, image reconciliation, a real P2002 collision, soft deactivation, the sweep including its NULL-safe predicate, and the lock/heartbeat/finalisation lifecycle. The harness refuses to start unless the database name ends in `_test`. |
 | S7 | **`variant-sync` infers `currencyCode` from an already-written sibling variant.** A product whose inline variant page wrote nothing would fall back to `"USD"`. | Unreachable today -- a chain only exists when the inline page wrote 100 variants. | Accepted, guarded by the fallback. |
 
@@ -298,7 +307,9 @@ that `variantSyncComplete` flips to true only on `hasNextPage: false`. Creating 
 
 ## 3a. Storefront (Phase 3)
 
-Implemented and verified against the 17 real synced products.
+Implemented and verified live. At the time that was against the 17-product Shopify demo seed
+catalog; the catalog has since been replaced, and the storefront was re-verified against the current
+one (3a.2).
 
 | Concern | File |
 |---|---|
@@ -332,6 +343,29 @@ one additional query, so it is three queries regardless of product count, not 1 
 handles the trailing `publishedAt IS NULL` group explicitly -- `publishedAt < x` is NULL, not
 true, for those rows.
 
+### 3a.2 Current catalog (electronics)
+
+The Shopify demo seed catalog was replaced with a 10-product electronics catalog. Products were
+created **in Shopify** and reached MySQL only through the existing sync -- nothing is hardcoded in the
+storefront, and no sync code changed to accommodate them.
+
+| Current state | Value |
+|---|---|
+| Storefront-visible products (`isActive AND status = ACTIVE`) | **10** |
+| Active variants across them | **19** |
+| Products with at least one synced image | **10 / 10** (one image each, Shopify CDN) |
+| Inventory total across the 19 variants | **501** |
+| Former seed products | **archived in Shopify**, retained locally as inactive rows |
+| Former seed variants | **26, all inactive** (`deactivationReason = SHOPIFY_STATUS`) |
+
+Nothing was deleted on either side: archiving is `productUpdate(status: ARCHIVED)` in Shopify, and the
+sync deactivates locally rather than removing rows, so the 17 seed products and their 26 variants are
+still present and still reachable by the one historical order that references one of them.
+
+Two things this exercise established, both recorded elsewhere rather than here: the sync propagates a
+product's status to its variants (the cascade fix), and `write_products` + `write_inventory` +
+`read_orders` are required beyond the original read scopes.
+
 ### 3a.1 Storefront known gaps
 
 | # | Gap | Status |
@@ -340,7 +374,7 @@ true, for those rows.
 | F2 | **`next/image` bypassed.** Images render through `<img>`; using `next/image` needs every Shopify CDN host allow-listed in `next.config.ts`. | Open, two lint warnings record it. |
 | F3 | **AdminLTE is vendored, not installed.** `vendor/adminlte/adminlte.min.css` (MIT). The npm package pulls ~60 transitive dependencies to deliver one stylesheet and cannot install reproducibly -- a transitive `husky` prepare script fails on a machine without husky, which left the package missing from `package.json` while its files sat in `node_modules`. | Closed by vendoring; the file header records version, provenance and update steps. |
 | F4 | **No page-level rendering test.** Correctness is covered at the service layer and by manual checks; nothing automated asserts the pages render. | Open. Playwright would close it. |
-| F5 | **Keyset pagination never exercised live.** 15 products fit one 24-card page. | Open; unit-tested, and the integration suite pages through a seeded set. |
+| F5 | **Keyset pagination never exercised live.** The whole catalog fits one 24-card page -- 15 products when the seed catalog was live, 10 now. | Open; unit-tested, and the integration suite pages through a seeded set. |
 | F6 | **Publication state is not synced**, so an active-but-unpublished product appears on the storefront (see §3.4). | Open, deliberate. |
 
 ---

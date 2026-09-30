@@ -22,7 +22,7 @@ storefront's source of truth and a separate worker process owning every Shopify 
 | Check | Result |
 |---|---|
 | `npm test` | **284 passed** (19 files) |
-| `npm run test:integration` | **179 passed** (7 files, real MySQL + real Redis) |
+| `npm run test:integration` | **185 passed** (7 files, real MySQL + real Redis) |
 | `npm run typecheck` | clean |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean |
@@ -64,6 +64,8 @@ If you have ten minutes, these are the files where the design actually lives.
 The commit history is phase-by-phase and each message explains the decisions in that phase:
 
 ```
+15d4ab0 fix: cascade product status to synced variants
+365de98 docs: add project README and submission documentation
 8460f63 feat: add asynchronous Shopify COD order sync
 66f3cd3 feat: add cart and COD checkout flow
 6492a79 feat: add MySQL-backed storefront catalog
@@ -71,6 +73,10 @@ c9c9318 fix: harden Shopify auth and live sync verification
 0373898 feat: add background Shopify product sync pipeline
 8c15d13 chore: add database and local infrastructure foundation
 ```
+
+The electronics catalog that the storefront now serves required **no commit**: the products were
+created in Shopify and arrived through the existing sync. `15d4ab0` came out of that exercise — it
+fixes a sync bug archiving the old catalog exposed.
 
 ## Design decisions worth defending
 
