@@ -11,7 +11,7 @@ Last run: all five checks below, plus the live order in §4.
 | Command | Result |
 |---|---|
 | `npm test` | **284 passed**, 19 files |
-| `npm run test:integration` | **185 passed**, 7 files (real MySQL + real Redis) |
+| `npm run test:integration` | **190 passed**, 7 files (real MySQL + real Redis) |
 | `npm run typecheck` | clean (`tsc --noEmit`, no output) |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean — 9 routes compiled |
@@ -55,7 +55,7 @@ Behaviours worth calling out, because they encode rules rather than mechanics:
 - the submission tag stays inside Shopify's 40-character limit for a real key **and** for any key
   the `VARCHAR(64)` column can hold
 
-## 3. Integration suite (185 tests, 7 files)
+## 3. Integration suite (190 tests, 7 files)
 
 Real MySQL for everything, and real Redis for the queue tests. Shopify is faked; the database is
 not — every claim in these tests is about what MySQL does under concurrent conditional updates,
@@ -182,34 +182,41 @@ hardcoded in the storefront and no sync code changed for them.
 | Claim | Evidence |
 |---|---|
 | 10 electronics products storefront-visible | `isActive = true AND status = ACTIVE` count is 10; the listing renders 10 cards |
-| 19 variants active | 19 / 19 active, none carrying a `deactivationReason` |
-| Prices, SKUs, inventory | verified row by row against the specification; 19 / 19 SKUs present; inventory total **500** — 501 as created, less one unit of `ELS-GRY` sold by the storefront order below |
+| 14 variants active | 14 active, none carrying a `deactivationReason`; four products keep two variants (keyboard, smartwatch, USB-C hub, power bank) and six keep one |
+| Prices, SKUs, inventory | verified row by row per product; inventory total **356** across the 14 active variants |
+| 5 variants removed in Shopify | deleted with `productVariantsBulkDelete` (`PWH-WHT`, `GGM-WHT`, `EBS-BLU`, `ELS-GRY`, `SCW-WHT`); each survives locally as an **inactive** row with `deactivationReason = MISSING_FROM_SYNC`, so nothing was hard-deleted |
+| Removed variants are no longer sellable | absent from the listing and from every detail page; a cart request for one is refused with `variant_inactive` and `checkoutable: false`. Before the reconcile fix it would have been accepted |
 | All 10 have a working image | 10 `ProductImage` rows, one per product, `position 1`, `https://cdn.shopify.com/…`; one URL fetched directly → HTTP 200, `image/png`, 1,349,958 bytes |
 | Listing renders images | 10 CDN `<img>` sources, **0** "No image" placeholders (10 before the upload) |
 | A detail page renders its image | `/products/axis-smartwatch` 200, one gallery image, no placeholder, no thumbnail strip (single image) |
 | Variant switching | both variants' titles, prices and SKUs present in the delivered payload, so switching needs no request; a single-variant product shows no selector |
-| Cart hydration | two electronics lines priced from MySQL, subtotal `269.97 USD`, `checkoutable: true` |
+| Cart hydration | two lines of a retained multi-variant product priced from MySQL, subtotal `139.97 USD`, `checkoutable: true` |
 | Old seed products archived | 15 ACTIVE seed products archived in Shopify by handle; already-ARCHIVED and DRAFT ones untouched; **nothing deleted** |
 | Old seed variants inactive | 26 / 26 inactive, all `deactivationReason = SHOPIFY_STATUS`; 0 variants active under an inactive product |
 | Archived products absent from the storefront | 0 occurrences of `Snowboard`, `Gift Card` or `Ski Wax` on the listing; three archived detail pages 404 |
 | Storefront still reads only MySQL | the web process log contains 0 Shopify references across every page load and API call; no storefront, cart, checkout or route module imports the Shopify client |
-| The historical live COD order remains valid | `SYNCED`, with its draft and order ids and its price snapshots intact — archiving the product it references changed nothing about it. It is no longer the only order; see below |
+| Both orders remain valid | each `SYNCED` with its Shopify ids and price snapshots intact. Neither archiving a product nor **deleting a variant** changed anything about them: the order whose variant was deleted still resolves to that variant row and still carries its price snapshot |
 
-No order was placed *during* the catalog migration itself.
+### Orders
 
-**A second real order has since been placed through the storefront**, unprompted, on the new
-catalog: 1 x Elevate Laptop Stand (`ELS-GRY`) for 34.99 USD, `SYNCED` locally on its **first**
-attempt, and `PENDING` / unpaid in Shopify. Its idempotency key is a browser-minted UUID from
-`CheckoutForm` and its customer details are not the synthetic fixture used in §4, so it came from
-the storefront UI rather than from any script here.
+**Two real orders exist, and both reached Shopify successfully.** 2 local orders, 2 Shopify
+orders, one-to-one; both `SYNCED` locally and both `PENDING` / unpaid in Shopify, which is correct
+for cash on delivery.
 
-Current order state: **2 local orders, 2 Shopify orders**, one-to-one, both `SYNCED` locally and
-both `PENDING` / unpaid in Shopify. One is the controlled test of §4; the other is the storefront
-order described here. Nothing was created accidentally — no checkout request was issued by any
-verification script after §4, and this order predates the branding work that followed it.
+| | Origin | Evidence of origin | Catalog it exercised |
+|---|---|---|---|
+| Order 1 | **Phase 5 verification** — the controlled test described in §4 | idempotency key matches this project's verification-script pattern; customer details are the synthetic fixture; 6 attempts, which is the record of the bugs that run exposed | the old Shopify seed catalog |
+| Order 2 | **Manual UI checkout** through the storefront | browser-minted UUID key from `CheckoutForm`; customer details are **not** the fixture; 1 attempt | the **electronics** catalog |
 
-That order is also the only end-to-end evidence for the **electronics** catalog: §4's controlled
-test ran against a product from the old seed catalog.
+So the electronics catalog has its own end-to-end evidence, which §4 cannot provide: §4's test ran
+against a seed-catalog product.
+
+Neither was created accidentally. No verification script has issued a checkout request since §4,
+and order 2 predates the branding and variant work that followed it. No order was placed during the
+catalog migration itself, nor during the variant cleanup.
+
+Order identifiers, references, idempotency keys and customer details are deliberately not
+reproduced here; the orders are described by origin, product, amount and status only.
 
 ## 6. What has NOT been verified live
 

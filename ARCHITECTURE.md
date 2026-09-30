@@ -352,11 +352,12 @@ storefront, and no sync code changed to accommodate them.
 | Current state | Value |
 |---|---|
 | Storefront-visible products (`isActive AND status = ACTIVE`) | **10** |
-| Active variants across them | **19** |
+| Active variants across them | **14** — four products keep two variants (keyboard, smartwatch, USB-C hub, power bank), the other six keep one |
 | Products with at least one synced image | **10 / 10** (one image each, Shopify CDN) |
-| Inventory total across the 19 variants | **500** (501 as created, less one unit sold by a real storefront order) |
+| Inventory total across the 14 active variants | **356** |
 | Former seed products | **archived in Shopify**, retained locally as inactive rows |
 | Former seed variants | **26, all inactive** (`deactivationReason = SHOPIFY_STATUS`) |
+| Variants deleted in Shopify during catalog tidy-up | **5**, retained locally as inactive rows (`deactivationReason = MISSING_FROM_SYNC`) |
 
 Nothing was deleted on either side: archiving is `productUpdate(status: ARCHIVED)` in Shopify, and the
 sync deactivates locally rather than removing rows, so the 17 seed products and their 26 variants are
