@@ -69,7 +69,10 @@ export async function processVariantSync(job: Job<VariantSyncPayload>): Promise<
     async () => {
       const product = await prisma.product.findUnique({
         where: { id: productId },
-        select: { id: true },
+        // `isActive` as well as the id: a continuation page must write its
+        // variants with the PARENT's visibility, or a chain that spans an archive
+        // in Shopify would leave live variants under a dead product.
+        select: { id: true, isActive: true },
       });
 
       // The product row can disappear between pages only by hard deletion,
@@ -104,6 +107,9 @@ export async function processVariantSync(job: Job<VariantSyncPayload>): Promise<
           const count = await upsertVariants(tx, productId, page.variants, {
             syncRunId,
             currencyCode,
+            // The product row was written by the page job from Shopify's status,
+            // so it is the authority on visibility for this chain.
+            productIsActive: product.isActive,
             log,
           });
 

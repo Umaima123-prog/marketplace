@@ -130,6 +130,9 @@ export async function upsertProduct(
   const variantsUpserted = await upsertVariants(db, product.id, mapped.variants, {
     syncRunId: options.syncRunId,
     currencyCode: options.currencyCode,
+    // The same condition the product row was just written with, so parent and
+    // children cannot disagree within one upsert.
+    productIsActive: mapped.status === "ACTIVE",
     now,
     log,
   });
@@ -143,7 +146,23 @@ export async function upsertVariants(
   db: Db,
   productId: string,
   variants: MappedVariant[],
-  options: { syncRunId: string; currencyCode: string; now?: Date; log?: Logger },
+  options: {
+    syncRunId: string;
+    currencyCode: string;
+    /**
+     * Whether the PARENT product is visible, i.e. Shopify reports it ACTIVE.
+     *
+     * Required rather than defaulted, deliberately: a variant's visibility is not
+     * its own property, and every call site has to state the parent's. Defaulting
+     * it to `true` is precisely the bug this parameter exists to remove -- the
+     * upsert used to hard-code `isActive: true`, so archiving a product in Shopify
+     * left 26 live variants under dead products, contradicting the invariant this
+     * file's own sweep comment relies on.
+     */
+    productIsActive: boolean;
+    now?: Date;
+    log?: Logger;
+  },
 ): Promise<number> {
   const now = options.now ?? new Date();
   let count = 0;
@@ -175,9 +194,12 @@ export async function upsertVariants(
       inventoryQuantity: variant.inventoryQuantity,
       inventoryTracked: variant.inventoryTracked,
       inventoryPolicy: variant.inventoryPolicy,
-      isActive: true,
-      deactivatedAt: null,
-      deactivationReason: null,
+      // Mirrors the product's own derivation above: a variant under a product
+      // Shopify no longer sells is not sellable either. `SHOPIFY_STATUS` is the
+      // same reason the product carries, because it is the same cause.
+      isActive: options.productIsActive,
+      deactivatedAt: options.productIsActive ? null : now,
+      deactivationReason: options.productIsActive ? null : ("SHOPIFY_STATUS" as const),
       shopifyUpdatedAt: variant.shopifyUpdatedAt,
       lastSyncRunId: options.syncRunId,
       syncedAt: now,

@@ -210,7 +210,7 @@ describe("variant create and upsert", () => {
           selectedOptions: [],
         },
       ],
-      { syncRunId: run.id, currencyCode: "PKR" },
+      { syncRunId: run.id, currencyCode: "PKR", productIsActive: true },
     );
 
     const variants = await db.productVariant.findMany();
@@ -263,6 +263,156 @@ describe("variant create and upsert", () => {
     stored = await db.product.findUniqueOrThrow({ where: { id: created.productId } });
     expect(stored.variantSyncComplete).toBe(true);
     expect(stored.variantSyncCursor).toBeNull();
+  });
+});
+
+describe("variant visibility follows the parent product", () => {
+  /**
+   * The invariant: `Product.isActive = false` implies every one of its variants is
+   * inactive. The sweep path always honoured it; the STATUS path did not, because
+   * the variant upsert hard-coded `isActive: true`. Archiving a product in Shopify
+   * therefore left live variants under a dead product -- 26 of them in the
+   * development database -- which is exactly the "orderable item nobody can find"
+   * this file's sweep comment warns about.
+   *
+   * Nothing customer-facing depended on it (both the storefront filter and
+   * `evaluateLine` check the parent as well), so these tests pin the database
+   * state rather than a user-visible symptom.
+   */
+
+  it("keeps variants active for an ACTIVE product", async () => {
+    const run = await createRun();
+    await upsertProduct(db, product({ status: "ACTIVE" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const p = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(p.isActive).toBe(true);
+    expect(p.variants.length).toBeGreaterThan(0);
+    for (const v of p.variants) {
+      expect(v.isActive).toBe(true);
+      expect(v.deactivatedAt).toBeNull();
+      expect(v.deactivationReason).toBeNull();
+    }
+  });
+
+  it("deactivates variants when a product goes ACTIVE -> ARCHIVED", async () => {
+    const run = await createRun();
+    await upsertProduct(db, product({ status: "ACTIVE" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const before = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(before.variants.every((v) => v.isActive)).toBe(true);
+
+    // The same product, now archived upstream. `updatedAt` moves forward so the
+    // shopifyUpdatedAt guard does not skip the write.
+    await upsertProduct(
+      db,
+      product({ status: "ARCHIVED", updatedAt: "2026-10-01T00:00:00Z" }),
+      { syncRunId: run.id, currencyCode: "PKR" },
+    );
+
+    const after = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(after.status).toBe("ARCHIVED");
+    expect(after.isActive).toBe(false);
+    expect(after.variants.length).toBe(before.variants.length);
+    for (const v of after.variants) {
+      expect(v.isActive).toBe(false);
+      expect(v.deactivatedAt).not.toBeNull();
+      expect(v.deactivationReason).toBe("SHOPIFY_STATUS");
+    }
+  });
+
+  it("deactivates variants when a product goes ACTIVE -> DRAFT", async () => {
+    const run = await createRun();
+    await upsertProduct(db, product({ status: "ACTIVE" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    await upsertProduct(db, product({ status: "DRAFT", updatedAt: "2026-10-01T00:00:00Z" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const after = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(after.status).toBe("DRAFT");
+    expect(after.isActive).toBe(false);
+    for (const v of after.variants) {
+      expect(v.isActive).toBe(false);
+      expect(v.deactivationReason).toBe("SHOPIFY_STATUS");
+    }
+  });
+
+  it("reactivates variants when a product returns to ACTIVE", async () => {
+    // The mirror case: the derivation must work in both directions, or a product
+    // un-archived in Shopify would come back unsellable.
+    const run = await createRun();
+    await upsertProduct(db, product({ status: "ARCHIVED" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const archived = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(archived.variants.every((v) => !v.isActive)).toBe(true);
+
+    await upsertProduct(db, product({ status: "ACTIVE", updatedAt: "2026-10-01T00:00:00Z" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const revived = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(revived.isActive).toBe(true);
+    for (const v of revived.variants) {
+      expect(v.isActive).toBe(true);
+      expect(v.deactivatedAt).toBeNull();
+      expect(v.deactivationReason).toBeNull();
+    }
+  });
+
+  it("writes inactive variants for a product that is archived on first sight", async () => {
+    // How the development store's seed data arrived: already ARCHIVED before the
+    // first sync ever ran, so no transition was ever observed.
+    const run = await createRun();
+    await upsertProduct(db, product({ status: "ARCHIVED" }), {
+      syncRunId: run.id,
+      currencyCode: "PKR",
+    });
+
+    const p = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(p.isActive).toBe(false);
+    expect(p.variants.length).toBeGreaterThan(0);
+    expect(p.variants.every((v) => v.isActive === false)).toBe(true);
+  });
+
+  it("leaves the sweep's own deactivation reason intact", async () => {
+    // The sweep path was already correct and must stay distinguishable: a variant
+    // removed upstream is MISSING_FROM_SYNC, not SHOPIFY_STATUS.
+    const first = await createRun();
+    await upsertProduct(db, product({ status: "ACTIVE" }), {
+      syncRunId: first.id,
+      currencyCode: "PKR",
+    });
+
+    // `activeLock` is UNIQUE -- one run holds it at a time -- so the first run is
+    // finalised before the next begins, exactly as the worker does.
+    await db.syncRun.update({
+      where: { id: first.id },
+      data: { activeLock: null, status: "COMPLETED" },
+    });
+
+    const second = await createRun();
+    await sweepMissingProducts(db, second.id);
+
+    const p = await db.product.findFirstOrThrow({ include: { variants: true } });
+    expect(p.isActive).toBe(false);
+    for (const v of p.variants) {
+      expect(v.isActive).toBe(false);
+      expect(v.deactivationReason).toBe("MISSING_FROM_SYNC");
+    }
   });
 });
 
