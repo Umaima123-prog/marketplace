@@ -13,7 +13,7 @@ import { describeEnv } from "@/src/lib/env";
 import { logger } from "@/src/lib/logger";
 import { prisma } from "@/src/lib/prisma";
 import { createWorkerConnection } from "@/src/lib/redis";
-import { QUEUE } from "@/src/lib/queues";
+import { QUEUE, workerLockDurationMs } from "@/src/lib/queues";
 import { shouldRetry } from "@/src/lib/shopify/errors";
 
 import { processOrderRecovery } from "./processors/order-recovery";
@@ -28,10 +28,23 @@ const log = logger.child({ service: "worker" });
 /**
  * `lockDuration` must exceed p99 job duration or BullMQ decides a healthy job
  * is stalled and runs it a second time. A page job is one Shopify round trip
- * plus a transaction, so 2 minutes is generous; the stalled-job check then
- * genuinely means "the process died".
+ * plus a transaction, so the floor is the page transaction's own budget.
+ *
+ * DERIVED rather than a second hard-coded number, deliberately. These two
+ * settings are coupled: raising the transaction timeout alone would push a slow
+ * page past the lock and trade "Transaction not found" for a stalled job being
+ * re-delivered and the page written twice. Deriving it means the two cannot be
+ * configured into disagreement -- whatever `SYNC_PAGE_TRANSACTION_TIMEOUT_MS`
+ * is set to, the lock outlives it.
+ *
+ * The headroom covers everything in the job that is NOT the transaction: the
+ * heartbeat, the shop-currency lookup, the Shopify page fetch (including a
+ * throttle wait), and the post-commit enqueues.
+ *
+ * The derivation lives in `queues.ts` so it is unit-testable without importing
+ * this module, which starts workers on import.
  */
-const LOCK_DURATION_MS = 120_000;
+const LOCK_DURATION_MS = workerLockDurationMs();
 
 const workers: Worker[] = [];
 

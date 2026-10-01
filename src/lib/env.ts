@@ -73,6 +73,35 @@ export const env = Object.freeze(
     shopifyVariantsPerPage: integer("SHOPIFY_VARIANTS_PER_PAGE", 100, 1),
     productSyncIntervalMinutes: integer("PRODUCT_SYNC_INTERVAL_MINUTES", 15, 1),
     /**
+     * Budget for ONE product page's write transaction, and how long to wait for
+     * a pool connection to start it.
+     *
+     * Sized from latency, not taste. The transaction is a few hundred SEQUENTIAL
+     * statements -- per product: a read, an upsert, an image reconcile, an image
+     * index read and a variant sweep; per variant: a read and an upsert -- so its
+     * duration is dominated by round trips, not by server work.
+     *
+     * Measured against the production MySQL over Railway's public TCP proxy:
+     * ~370 ms mean per statement (p95 ~711 ms), versus ~1 ms on a local socket.
+     * A 27-product page is ~280 statements, so ~103 s remotely and well under a
+     * second locally. The previous hard-coded 60 s therefore held locally and
+     * expired in production, after which Prisma rejects the next statement with
+     * "Transaction not found" -- the error surfaces wherever the transaction
+     * happens to be, which is why it was seen in `reconcileImages`.
+     *
+     * 240 s covers a full 50-product page at the measured mean with headroom.
+     * This is NOT a global timeout: it is passed to the one `$transaction` call
+     * in the page processor. Lower `SHOPIFY_PRODUCTS_PER_PAGE` to make each
+     * transaction shorter instead of allowing a longer one.
+     */
+    syncPageTransactionTimeoutMs: integer("SYNC_PAGE_TRANSACTION_TIMEOUT_MS", 240_000, 1_000),
+    /**
+     * Pool wait for that transaction. A cold connection to the remote database
+     * measured 3.3 s (TCP + auth), so the old 15 s was adequate; 30 s simply
+     * stops a transient pool contention from failing a sync run.
+     */
+    syncPageTransactionMaxWaitMs: integer("SYNC_PAGE_TRANSACTION_MAX_WAIT_MS", 30_000, 1_000),
+    /**
      * How long a worker's claim on an order is believed.
      *
      * A SYNCING row whose `claimedAt` is older than this belonged to a worker

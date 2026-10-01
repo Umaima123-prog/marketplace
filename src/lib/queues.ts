@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 
 import { Queue, type JobsOptions } from "bullmq";
 
+import { env } from "./env";
 import { getQueueConnection } from "./redis";
 
 /**
@@ -323,4 +324,27 @@ export async function enqueueProductSync(payload: ProductSyncPayload): Promise<E
   // deduplication key -- so a differing id means this trigger was folded into
   // one already in flight.
   return { jobId: job.id, enqueued: true };
+}
+
+/**
+ * How long a worker's lock on a job is believed, in milliseconds.
+ *
+ * DERIVED from the page transaction's budget rather than hard-coded, because the
+ * two are coupled: a page job is one Shopify round trip plus that transaction,
+ * so a lock shorter than the transaction lets BullMQ declare a perfectly healthy
+ * page stalled and re-deliver it. Raising only the transaction timeout would
+ * therefore trade "Transaction not found" for a page written twice.
+ *
+ * The floor keeps the previous 120s for every other queue, and the headroom
+ * covers the parts of a page job that are not the transaction: the heartbeat,
+ * the shop-currency lookup, the Shopify fetch including any throttle wait, and
+ * the post-commit enqueues.
+ */
+export const LOCK_HEADROOM_MS = 60_000;
+export const MIN_LOCK_DURATION_MS = 120_000;
+
+export function workerLockDurationMs(
+  pageTransactionTimeoutMs: number = env.syncPageTransactionTimeoutMs,
+): number {
+  return Math.max(MIN_LOCK_DURATION_MS, pageTransactionTimeoutMs + LOCK_HEADROOM_MS);
 }

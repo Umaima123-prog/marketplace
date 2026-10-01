@@ -8,6 +8,7 @@
  */
 import type { Job } from "bullmq";
 
+import { env } from "@/src/lib/env";
 import { prisma } from "@/src/lib/prisma";
 import { jobLogger } from "@/src/lib/logger";
 import { withJobLog } from "@/src/lib/jobs/job-log";
@@ -166,8 +167,19 @@ export async function processProductSyncPage(job: Job<ProductSyncPagePayload>): 
           }
         },
         // A page of 50 products with variants and images is a few hundred
-        // statements; the default 5s timeout is not enough on a cold cache.
-        { timeout: 60_000, maxWait: 15_000 },
+        // SEQUENTIAL statements, so the budget is a function of round-trip
+        // latency, not of server work: ~1 ms per statement on a local socket but
+        // ~370 ms against the production database over a public TCP proxy. The
+        // previously hard-coded 60 s was ample locally and expired in
+        // production, and a transaction Prisma has closed rejects its next
+        // statement with "Transaction not found".
+        //
+        // Configurable per environment rather than raised globally -- see
+        // `syncPageTransactionTimeoutMs` in env.ts for the measurements.
+        {
+          timeout: env.syncPageTransactionTimeoutMs,
+          maxWait: env.syncPageTransactionMaxWaitMs,
+        },
       );
 
       // Enqueued AFTER the transaction commits. Enqueuing inside would publish

@@ -27,14 +27,15 @@ storefront's source of truth and a separate worker process owning every Shopify 
 
 | Check | Result |
 |---|---|
-| `npm test` | **302 passed** (20 files) |
-| `npm run test:integration` | **197 passed** (7 files, real MySQL + real Redis) |
+| `npm test` | **322 passed** (22 files) |
+| `npm run test:integration` | **210 passed** (7 files, real MySQL + real Redis) |
 | `npm run typecheck` | clean |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean |
 | Real end-to-end Shopify COD orders | **2 verified** — one from the controlled Phase 5 test, one from a manual storefront checkout. Each is `SYNCED` locally with one draft and one Shopify order, `displayFinancialStatus: PENDING` with the full amount outstanding, totals matching to the cent, no duplicates |
 | Permanent-failure path | **2 local orders `FAILED`**, both refused by Shopify at draft creation (`phone: Phone is invalid`), correctly classified non-retryable with no draft and no Shopify order created. Their cause is now validated out at the checkout boundary — see [VERIFICATION.md](VERIFICATION.md) §5a |
 | Storefront UX | **58 checks** in a real headless browser: variant switching, sold-out states, quantity caps, cart, checkout and three viewport widths (VERIFICATION.md §5b) |
+| Deployed on Railway | Web service **Online**; all four migrations applied to the production MySQL; a full sync completed with `productsApplied = 10`, `variantsUpserted = 19`, `finalised = COMPLETED`; the live storefront serves the 10 products. One production-only bug (a transaction budget too small for remote latency) was found and fixed — [VERIFICATION.md](VERIFICATION.md) §5c. No worker service is deployed yet |
 | Demo video | <https://www.loom.com/share/02fc3b42859640d9b1428029c730b425> |
 
 Details, including what was *not* verified live, are in [VERIFICATION.md](VERIFICATION.md).

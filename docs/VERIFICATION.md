@@ -14,8 +14,8 @@ this document comes from running the command or query shown, not from the video.
 
 | Command | Result |
 |---|---|
-| `npm test` | **302 passed**, 20 files |
-| `npm run test:integration` | **197 passed**, 7 files (real MySQL + real Redis) |
+| `npm test` | **322 passed**, 22 files |
+| `npm run test:integration` | **210 passed**, 7 files (real MySQL + real Redis) |
 | `npm run typecheck` | clean (`tsc --noEmit`, no output) |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean — 9 routes compiled |
@@ -29,14 +29,14 @@ database first, and the harness **refuses to start** unless `TEST_DATABASE_URL` 
 ending in `_test` — those tests `TRUNCATE` every table, and a bypass flag is a flag someone will
 set.
 
-## 2. Unit suite (302 tests, 20 files)
+## 2. Unit suite (322 tests, 22 files)
 
 Pure logic, fixtures and fake clients.
 
 | Area | Files |
 |---|---|
 | Money | `money.test.ts` — exact-decimal comparison, rounding, formatting past `Number.MAX_SAFE_INTEGER`, and `normalizeMoney` (which exists because `Decimal.toString()` strips trailing zeros) |
-| Catalog sync | `product-mapper.test.ts`, `sync-decisions.test.ts`, `catalog-repo.test.ts`, `pagination.test.ts`, `throttle.test.ts` |
+| Catalog sync | `product-mapper.test.ts`, `sync-decisions.test.ts`, `catalog-repo.test.ts`, `pagination.test.ts`, `throttle.test.ts`, `variant-image.test.ts`, `sync-transaction-budget.test.ts` |
 | Shopify client | `shopify-auth.test.ts` — client-credentials exchange, caching, the single 401 re-exchange |
 | Queues | `queues.test.ts` — job-id safety, including that no id can contain `:` |
 | Environment | `env.test.ts` |
@@ -62,7 +62,7 @@ Behaviours worth calling out, because they encode rules rather than mechanics:
   it accepts the two Shopify accepted and rejects the two it refused, so the rule is calibrated
   against observed behaviour rather than taste
 
-## 3. Integration suite (197 tests, 7 files)
+## 3. Integration suite (210 tests, 7 files)
 
 Real MySQL for everything, and real Redis for the queue tests. Shopify is faked; the database is
 not — every claim in these tests is about what MySQL does under concurrent conditional updates,
@@ -197,7 +197,7 @@ hardcoded in the storefront and no sync code changed for them.
 |---|---|
 | 10 electronics products storefront-visible | `isActive = true AND status = ACTIVE` count is 10; the listing renders 10 cards |
 | 19 variants active | 19 active; nine products carry two variants and the webcam one |
-| Prices, SKUs, inventory | compared row by row against live Shopify in a single three-way check (spec / Shopify / MySQL): every option name, price, SKU, inventory quantity, `inventoryPolicy` and `tracked` flag agrees. Inventory total **319** across the 19 active variants |
+| Prices, SKUs, inventory | compared row by row against live Shopify in a single three-way check (spec / Shopify / MySQL): every option name, price, SKU, inventory quantity, `inventoryPolicy` and `tracked` flag agrees. Inventory total **318** across the 19 active variants — 319 when the spec was applied, and Shopify has since decremented `ELS-GRY` by one. Shopify and MySQL both read 318, which is the invariant that matters; the absolute number is the shop's to change |
 | 2 products are entirely sold out | ClearView webcam and SnapCharge charger: every active variant at zero. Both still listed, badged *Sold Out*, with Add to Cart disabled |
 | Images preserved through the variant work | 10 Shopify media and 10 `ProductImage` rows, unchanged; the convergence script asserts the media count per product before and after |
 | 5 variants were removed in an earlier tidy-up | deleted then with `productVariantsBulkDelete` (`PWH-WHT`, `GGM-WHT`, `EBS-BLU`, `ELS-GRY`, `SCW-WHT`); each still survives locally as an **inactive** row with `deactivationReason = MISSING_FROM_SYNC`, so nothing was ever hard-deleted |
@@ -310,6 +310,65 @@ unused draft, not an order: nothing was charged and nothing will ship. There is 
 
 Order identifiers, references, idempotency keys and customer details are deliberately not
 reproduced here; the orders are described by origin, product, amount and status only.
+
+## 5c. Production deployment on Railway
+
+The app runs on Railway (project `precious-smile`, service `marketplace`) against a MySQL service in
+a separate project, reached over a public TCP proxy. That topology is what produced the one
+production-only bug in this project, so it is recorded with its measurements.
+
+| Claim | Evidence |
+|---|---|
+| Migrations applied to the production database | `prisma migrate deploy` applied all four; `prisma migrate status` then reports *Database schema is up to date!* |
+| Production catalog populated by the real sync | 10 storefront-visible products, 19 active variants, 27 product rows including archived, 32 `ProductImage` rows, 8 variant-to-image mappings |
+| A full sync completes | run at 15:16 UTC: `productsApplied = 10`, `variantsUpserted = 19`, `pagesProcessed = 1`, `finalised = COMPLETED` |
+| The live storefront serves it | `GET /` returns 200 with the *Featured Electronics* heading, a rendered count of "10 products", all 10 handles, 10 distinct titles, and 8 *In stock* + 2 *Sold Out* badges |
+
+### The transaction budget, and why it only failed in production
+
+The page write transaction is a few hundred **sequential** statements, so its duration is set by
+round-trip latency rather than by server work. Measured per statement: **~1 ms** on a local socket,
+**~370 ms** (p95 711 ms) against the production database through the proxy — a cold connect is 3.3 s.
+
+A 27-product page is ~280 statements: under a second locally, **~103 s** remotely. The hard-coded
+60 s budget was therefore ample in every local and integration run and expired in production. Once
+Prisma closes a timed-out transaction it rejects the next statement with *"Transaction not found"*,
+which surfaced inside `reconcileImages()` — not the faulty call, merely where the clock ran out.
+
+Recorded in the production `sync_runs` table, before and after:
+
+| Started (UTC) | Status | Duration | Applied | Variants |
+|---|---|---|---|---|
+| 14:46 | `PARTIAL` | 368 s | 0 | 0 — `page 0 exhausted 5 attempts: Invalid db.productImage.delet…` |
+| 15:11 | `COMPLETED` | 234.8 s | 27 | 45 |
+| 15:16 | `COMPLETED` | 116.5 s | 10 | 19 |
+
+The 235 s page is the proof: it could not have committed under the old 60 s budget.
+
+The fix is two coupled numbers, not one. `SYNC_PAGE_TRANSACTION_TIMEOUT_MS` (default 240 000) sizes
+the budget for remote latency, and the BullMQ job lock is **derived** from it
+(`workerLockDurationMs`, `max(120s, budget + 60s)`). Raising the budget alone would let a slow but
+healthy page outlive its lock, so BullMQ would declare it stalled and re-deliver it — a page written
+twice instead of a clean failure. Deriving the lock means the two cannot be configured into
+disagreement. Since the fix: zero *"Transaction not found"* and zero stalled jobs.
+
+Production also sets **`SHOPIFY_PRODUCTS_PER_PAGE=10`**, which is the better lever: it shortens each
+transaction to ~110 statements (~41 s, ~199 s of headroom) with the same per-page atomicity, rather
+than relying on a long-held transaction. Atomicity, variant reconciliation, image reconciliation,
+the variant-image mapping, the incomplete-pagination gate and the final sweep are all unchanged — the
+fix changed two timeouts and nothing else.
+
+### Not yet in production
+
+- **No worker service is deployed.** Only the web service runs. The sync runs above were driven by a
+  worker started locally against the production environment, which has the same latency profile.
+  Until a worker service exists, no catalog sync and no order submission happen on their own, and an
+  order placed in production would sit in `PENDING_SYNC`.
+- **Repeatable sync schedulers are registered in the production Redis**, so any worker that connects
+  begins syncing every 15 minutes. The manual `FULL` trigger issued during this verification
+  correctly reported `sync_skipped: already_running`, which is the database lock doing its job.
+- **MySQL is publicly reachable** through the TCP proxy, which is what makes the cross-project
+  connection possible. It is password-protected, and public egress is billable.
 
 ## 6. What has NOT been verified live
 

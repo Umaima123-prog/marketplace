@@ -373,7 +373,7 @@ storefront, and no sync code changed to accommodate them.
 | Storefront-visible products (`isActive AND status = ACTIVE`) | **10** |
 | Active variants across them | **19** — nine products carry two variants, the webcam one |
 | Products with at least one synced image | **10 / 10** (one image each, Shopify CDN) |
-| Inventory total across the 19 active variants | **319** |
+| Inventory total across the 19 active variants | **318** — 318 in Shopify and 318 in MySQL. It was 319 when the variant spec was applied; Shopify has since decremented `ELS-GRY` by one, and the sync tracked it. The number moves with the shop, which is the point |
 | Products with every active variant at zero stock | **2** (ClearView webcam, SnapCharge charger) — shown as *Sold Out*, not hidden |
 | Former seed products | **archived in Shopify**, retained locally as inactive rows |
 | Former seed variants | **26, all inactive** (`deactivationReason = SHOPIFY_STATUS`) |
