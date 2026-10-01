@@ -86,6 +86,7 @@ function fakeDb(options: FakeOptions = {}) {
     productUpdate: 0,
     variantUpsert: 0,
     imageDeleteMany: 0,
+    imageFindMany: 0,
     productUpdateData: [] as unknown[],
     variantDeactivateWhere: [] as unknown[],
   };
@@ -127,6 +128,13 @@ function fakeDb(options: FakeOptions = {}) {
         calls.imageDeleteMany += 1;
         return { count: 0 };
       }),
+      // Read by `loadImageIndex` so a variant can reference an image row. One
+      // entry matching the product fixture's single media id, which is what lets
+      // a test assert the variant upsert carried a resolved `imageId`.
+      findMany: vi.fn(async () => {
+        calls.imageFindMany += 1;
+        return [{ id: "img-1", shopifyImageId: "gid://shopify/MediaImage/1" }];
+      }),
     },
   };
 
@@ -145,6 +153,9 @@ describe("upsertProduct", () => {
     expect(calls.variantUpsert).toBe(1);
     // Images are reconciled: anything absent from the payload is removed.
     expect(calls.imageDeleteMany).toBe(1);
+    // Images are reconciled and indexed BEFORE the variants are written, so a
+    // variant has an image row to reference on the run that creates it.
+    expect(calls.imageFindMany).toBe(1);
   });
 
   it("survives a P2002 race without failing the page", async () => {

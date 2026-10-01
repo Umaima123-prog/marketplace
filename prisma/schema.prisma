@@ -226,10 +226,28 @@ model ProductVariant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // --- Variant-specific image ---------------------------------------------
+  /// The image Shopify has assigned to this variant, or NULL when it has none.
+  ///
+  /// A reference to one of the product's OWN `ProductImage` rows rather than a
+  /// copy of the URL: Shopify draws a variant's media from the product's media
+  /// set (verified against the live store, 8 of 8 variant media ids were present
+  /// in their product's media), so there is nothing to duplicate and one place
+  /// to update when the URL changes.
+  ///
+  /// `onDelete: SetNull` is the important part. `reconcileImages` HARD-deletes
+  /// images Shopify no longer reports, so a variant pointing at a removed image
+  /// must not block that delete (Restrict) or take the variant with it
+  /// (Cascade). Clearing the reference degrades the variant to the product-image
+  /// fallback, which is exactly the no-assigned-image behaviour.
+  imageId String?
+  image   ProductImage? @relation(fields: [imageId], references: [id], onDelete: SetNull)
+
   orderItems OrderItem[]
 
   @@index([productId, position])
   @@index([lastSyncRunId])
+  @@index([imageId])
   @@map("product_variants")
 }
 
@@ -245,6 +263,9 @@ model ProductImage {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  /// Variants that have this image assigned. Empty for a plain gallery image.
+  variants ProductVariant[]
 
   /// Images are reconciled per product (upsert by shopifyImageId, then delete
   /// this product's images not present in the payload), so no sync stamp is
@@ -496,10 +517,10 @@ enum JobEntityType {
 model JobLog {
   id String @id @default(cuid())
 
-  queueName String @db.VarChar(64)
-  jobName   String @db.VarChar(64)
+  queueName   String @db.VarChar(64)
+  jobName     String @db.VarChar(64)
   /// BullMQ's job id. Not unique on its own — retries share it.
-  bullJobId String @db.VarChar(128)
+  bullJobId   String @db.VarChar(128)
   /// Which INSTANCE of that job id this attempt belongs to: BullMQ's
   /// `job.timestamp` (enqueue time in epoch millis), as a string.
   ///
@@ -514,7 +535,7 @@ model JobLog {
   /// `(bullJobId, attempt)` uniqueness among themselves rather than becoming
   /// duplicable.
   jobInstance String @default("") @db.VarChar(32)
-  attempt   Int
+  attempt     Int
 
   entityType JobEntityType?
   entityId   String?        @db.VarChar(64)

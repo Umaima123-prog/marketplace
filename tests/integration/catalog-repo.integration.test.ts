@@ -9,6 +9,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  loadImageIndex,
   markVariantSyncComplete,
   saveVariantCursor,
   sweepMissingProducts,
@@ -208,6 +209,7 @@ describe("variant create and upsert", () => {
           inventoryPolicy: "CONTINUE",
           shopifyUpdatedAt: new Date("2026-09-22T00:00:00Z"),
           selectedOptions: [],
+          shopifyImageId: null,
         },
       ],
       { syncRunId: run.id, currencyCode: "PKR", productIsActive: true },
@@ -797,5 +799,274 @@ describe("the final sweep", () => {
     const stored = await db.product.findFirstOrThrow();
     expect(stored.deactivationReason).toBe("SHOPIFY_STATUS");
     expect(stored.deactivatedAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+  });
+});
+
+/**
+ * Variant-specific images, end to end through the repository.
+ *
+ * The mapping is a foreign key to the product's own ProductImage rows, so these
+ * tests are about referential behaviour only a real database shows: that the id
+ * resolves, that re-running duplicates no image rows, that an image Shopify
+ * drops clears the reference instead of blocking its own delete, and that a
+ * partial variant payload cannot corrupt it.
+ */
+describe("variant image mapping", () => {
+  /**
+   * A second run. sync_runs.activeLock is UNIQUE, so the first run has to be
+   * finalised before another can exist -- the same constraint that caught an
+   * earlier test trying to hold two.
+   */
+  async function nextRun() {
+    await db.syncRun.updateMany({
+      where: { activeLock: "ACTIVE" },
+      data: { activeLock: null, status: "COMPLETED", finishedAt: new Date() },
+    });
+    return createRun();
+  }
+
+  const MEDIA_BLACK = { id: "gid://shopify/MediaImage/1", image: { url: "https://cdn/black.jpg", altText: "black" } };
+  const MEDIA_WHITE = { id: "gid://shopify/MediaImage/2", image: { url: "https://cdn/white.jpg", altText: "white" } };
+
+  /** Two product media; two variants assigned one each, and a third with none. */
+  function withVariantImages(overrides: Record<string, unknown> = {}) {
+    return product({
+      media: { nodes: [MEDIA_BLACK, MEDIA_WHITE] },
+      variants: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [
+          variantNode({
+            id: "gid://shopify/ProductVariant/1",
+            sku: "BLACK",
+            media: { nodes: [{ id: MEDIA_BLACK.id }] },
+          }),
+          variantNode({
+            id: "gid://shopify/ProductVariant/2",
+            sku: "WHITE",
+            position: 2,
+            media: { nodes: [{ id: MEDIA_WHITE.id }] },
+          }),
+          // No assigned image: the fallback case, and the majority in the real
+          // catalog (11 of 19).
+          variantNode({ id: "gid://shopify/ProductVariant/3", sku: "NOIMAGE", position: 3 }),
+        ],
+      },
+      ...overrides,
+    });
+  }
+
+  function storedVariants() {
+    return db.productVariant.findMany({
+      orderBy: { position: "asc" },
+      select: { sku: true, imageId: true, image: { select: { shopifyImageId: true, url: true } } },
+    });
+  }
+
+  it("syncs the variant to image mapping from the Shopify payload", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+
+    const variants = await storedVariants();
+    expect(variants.map((v) => [v.sku, v.image?.url ?? null])).toEqual([
+      ["BLACK", "https://cdn/black.jpg"],
+      ["WHITE", "https://cdn/white.jpg"],
+      ["NOIMAGE", null],
+    ]);
+
+    // Every mapping points at one of this product's own image rows.
+    const imageIds = new Set((await db.productImage.findMany({ select: { id: true } })).map((i) => i.id));
+    for (const v of variants) {
+      if (v.imageId) expect(imageIds.has(v.imageId)).toBe(true);
+    }
+  });
+
+  it("stores no mapping for a variant with no assigned image", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+
+    const noImage = await db.productVariant.findFirstOrThrow({ where: { sku: "NOIMAGE" } });
+    expect(noImage.imageId).toBeNull();
+  });
+
+  it("maps images on the run that CREATES the product, not one sync later", async () => {
+    // Regression guard: variants used to be written before the images existed,
+    // so a new product's mapping stayed null until the following sync.
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+
+    const black = await db.productVariant.findFirstOrThrow({
+      where: { sku: "BLACK" },
+      select: { image: { select: { url: true } } },
+    });
+    expect(black.image?.url).toBe("https://cdn/black.jpg");
+  });
+
+  it("re-running the sync duplicates no image rows and keeps the mapping stable", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+    const firstVariants = await storedVariants();
+    const firstImages = await db.productImage.findMany({ orderBy: { position: "asc" } });
+
+    const run2 = await nextRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run2.id, currencyCode: "PKR" });
+
+    const secondVariants = await storedVariants();
+    const secondImages = await db.productImage.findMany({ orderBy: { position: "asc" } });
+
+    // Upserted by shopifyImageId, not re-created: same count, same row ids, and
+    // the variants still reference those same rows.
+    expect(await db.productImage.count()).toBe(2);
+    expect(secondImages.map((i) => i.id)).toEqual(firstImages.map((i) => i.id));
+    expect(secondVariants.map((v) => v.imageId)).toEqual(firstVariants.map((v) => v.imageId));
+  });
+
+  it("clears the mapping when Shopify stops assigning an image", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+
+    // Same images, but the variant no longer has media. A newer updatedAt, or
+    // the payload would be skipped as stale.
+    const run2 = await nextRun();
+    await upsertProduct(
+      db,
+      product({
+        updatedAt: "2026-09-25T10:00:00Z",
+        media: { nodes: [MEDIA_BLACK, MEDIA_WHITE] },
+        variants: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            variantNode({
+              id: "gid://shopify/ProductVariant/1",
+              sku: "BLACK",
+              updatedAt: "2026-09-25T10:00:00Z",
+            }),
+          ],
+        },
+      }),
+      { syncRunId: run2.id, currencyCode: "PKR" },
+    );
+
+    const black = await db.productVariant.findFirstOrThrow({ where: { sku: "BLACK" } });
+    expect(black.imageId).toBeNull();
+  });
+
+  it("survives the image it references being deleted by the reconcile", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+
+    // Shopify drops the white image. reconcileImages hard-deletes it, and the FK
+    // is ON DELETE SET NULL -- so the variant survives and degrades to the
+    // fallback rather than blocking the delete or being deleted with it.
+    const run2 = await nextRun();
+    await upsertProduct(
+      db,
+      product({
+        updatedAt: "2026-09-25T10:00:00Z",
+        media: { nodes: [MEDIA_BLACK] },
+        variants: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: [
+            variantNode({
+              id: "gid://shopify/ProductVariant/2",
+              sku: "WHITE",
+              position: 2,
+              updatedAt: "2026-09-25T10:00:00Z",
+              media: { nodes: [{ id: MEDIA_WHITE.id }] },
+            }),
+          ],
+        },
+      }),
+      { syncRunId: run2.id, currencyCode: "PKR" },
+    );
+
+    const white = await db.productVariant.findFirstOrThrow({ where: { sku: "WHITE" } });
+    expect(white.imageId).toBeNull();
+    expect(await db.productImage.count()).toBe(1);
+  });
+
+  it("does not corrupt the mapping when variant pagination is incomplete", async () => {
+    // The continuation chain writes no images, so it supplies no index, and
+    // upsertVariants must then leave imageId exactly as it was.
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+
+    const before = await storedVariants();
+    expect(before.find((v) => v.sku === "BLACK")?.image?.url).toBe("https://cdn/black.jpg");
+
+    const created = await db.product.findFirstOrThrow({ select: { id: true } });
+    const run2 = await nextRun();
+
+    await upsertVariants(
+      db,
+      created.id,
+      [
+        {
+          shopifyVariantId: "gid://shopify/ProductVariant/1",
+          title: "Black",
+          sku: "BLACK",
+          position: 1,
+          price: "19.99",
+          compareAtPrice: null,
+          inventoryQuantity: 5,
+          inventoryTracked: true,
+          inventoryPolicy: "DENY",
+          shopifyUpdatedAt: new Date("2026-09-26T00:00:00Z"),
+          selectedOptions: [],
+          // Even an explicit null must not clear it, because no index was given.
+          shopifyImageId: null,
+        },
+      ],
+      { syncRunId: run2.id, currencyCode: "PKR", productIsActive: true },
+    );
+
+    const after = await storedVariants();
+    expect(after.find((v) => v.sku === "BLACK")?.image?.url).toBe("https://cdn/black.jpg");
+    expect(after.map((v) => v.imageId)).toEqual(before.map((v) => v.imageId));
+  });
+
+  it("maps a continuation page once the index is supplied, as the worker does", async () => {
+    const run = await createRun();
+    await upsertProduct(db, withVariantImages(), { syncRunId: run.id, currencyCode: "PKR" });
+    const created = await db.product.findFirstOrThrow({ select: { id: true } });
+
+    // Exactly what processVariantSync does: read the index the page job stored,
+    // then upsert the continuation page with it.
+    const index = await loadImageIndex(db, created.id);
+    expect(index.size).toBe(2);
+    expect(index.get(MEDIA_WHITE.id)).toBeDefined();
+
+    const run2 = await nextRun();
+    await upsertVariants(
+      db,
+      created.id,
+      [
+        {
+          shopifyVariantId: "gid://shopify/ProductVariant/4",
+          title: "Page two",
+          sku: "PAGE2",
+          position: 4,
+          price: "19.99",
+          compareAtPrice: null,
+          inventoryQuantity: 5,
+          inventoryTracked: true,
+          inventoryPolicy: "DENY",
+          shopifyUpdatedAt: new Date("2026-09-26T00:00:00Z"),
+          selectedOptions: [],
+          shopifyImageId: MEDIA_WHITE.id,
+        },
+      ],
+      {
+        syncRunId: run2.id,
+        currencyCode: "PKR",
+        productIsActive: true,
+        imageIdByShopifyImageId: index,
+      },
+    );
+
+    const page2 = await db.productVariant.findFirstOrThrow({
+      where: { sku: "PAGE2" },
+      select: { image: { select: { url: true } } },
+    });
+    expect(page2.image?.url).toBe("https://cdn/white.jpg");
   });
 });

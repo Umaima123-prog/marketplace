@@ -86,6 +86,23 @@ export const PRODUCTS_PAGE_QUERY = /* GraphQL */ `
             inventoryItem {
               tracked
             }
+            # The variant's own assigned image. ProductVariant.image is
+            # DEPRECATED on 2026-07 -- the schema says "Use media instead" -- so
+            # this reads the media connection and takes the first entry;
+            # Shopify's admin assigns one image per variant.
+            #
+            # Only the id is selected. It is a MediaImage GID drawn from the
+            # product's OWN media set (verified live against the store, 8/8), and
+            # the product media selection above already stores that id with its
+            # URL. Selecting the URL again would put it on the wire twice and
+            # invite two sources of truth for one image.
+            media(first: 1) {
+              nodes {
+                ... on MediaImage {
+                  id
+                }
+              }
+            }
           }
         }
       }
@@ -125,6 +142,15 @@ export const PRODUCT_VARIANTS_PAGE_QUERY = /* GraphQL */ `
           }
           inventoryItem {
             tracked
+          }
+          # As above. The continuation query needs it too, or a product with more
+          # than one variant page would map images for page 1 only.
+          media(first: 1) {
+            nodes {
+              ... on MediaImage {
+                id
+              }
+            }
           }
         }
       }

@@ -45,7 +45,7 @@ Written **only** by the sync worker; never by the web app and never by an admin 
 | Table | Unique | Indexes |
 |---|---|---|
 | `products` | `shopifyProductId`, `handle` | `(isActive, publishedAt, id)`, `(lastSyncRunId)`, `(variantSyncComplete)` |
-| `product_variants` | `shopifyVariantId` | `(productId, position)`, `(lastSyncRunId)` |
+| `product_variants` | `shopifyVariantId` | `(productId, position)`, `(lastSyncRunId)`, `(imageId)` |
 | `product_images` | `shopifyImageId` | `(productId, position)` |
 
 - `(isActive, publishedAt, id)` is the storefront listing index, and the column order is the
@@ -58,6 +58,13 @@ Written **only** by the sync worker; never by the web app and never by an admin 
   not stamped with a complete full run's id are the ones missing from Shopify.
 - `variantSyncComplete` is `false` while a variant chain is unfinished, so a truncated variant set
   is never presented as complete.
+- `product_variants.imageId` is a nullable FK to `product_images`, holding the image Shopify has
+  assigned to that variant. A **reference, not a copy**: Shopify draws a variant's media from the
+  product's own media set, so the row already exists and one URL has one home. NULL means no
+  assigned image, which is the majority case, and the storefront falls back to the product's first
+  image. `ON DELETE SET NULL` is deliberate — the image reconcile hard-deletes images Shopify no
+  longer reports, and a variant reference must neither block that delete nor be deleted with it,
+  since order history points at variants.
 - Deactivation is **soft**: `isActive`, `deactivatedAt`, `deactivationReason`. Nothing in the
   catalog is hard-deleted, except images on reconcile (gap S3).
 

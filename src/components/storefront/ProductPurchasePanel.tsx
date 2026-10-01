@@ -29,7 +29,16 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
   const initial = product.variants.find((variant) => variant.available) ?? product.variants[0];
 
   const [selectedId, setSelectedId] = useState<string | undefined>(initial?.id);
-  const [imageIndex, setImageIndex] = useState(0);
+  /**
+   * A thumbnail the shopper picked, as a url, or null for "follow the variant".
+   *
+   * Cleared by the option control itself, so selecting a variant always wins.
+   * An earlier version keyed this to the variant it was picked for, which looked
+   * equivalent and was not: going Black -> thumbnail -> White -> Black brought
+   * the old override back, and the image stopped following the selection. A
+   * manual choice belongs to one selection, not to a variant forever.
+   */
+  const [manualImage, setManualImage] = useState<string | null>(null);
   const [requestedQuantity, setRequestedQuantity] = useState(1);
   /**
    * Which variant was last added, not a boolean.
@@ -46,7 +55,22 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
   const selected: VariantView | undefined =
     product.variants.find((variant) => variant.id === selectedId) ?? initial;
 
-  const image = product.images[imageIndex] ?? product.images[0] ?? null;
+  /**
+   * Which image the gallery shows, in precedence order:
+   *
+   *   1. a thumbnail the shopper picked for THIS variant;
+   *   2. the image Shopify assigned to the selected variant;
+   *   3. the product's first image.
+   *
+   * (3) is the fallback for a variant with no assigned image, which is the
+   * common case -- 11 of the 19 variants in the current catalog have none. It is
+   * a normal state, not a missing one.
+   */
+  const image =
+    (manualImage ? product.images.find((candidate) => candidate.url === manualImage) : undefined) ??
+    selected?.image ??
+    product.images[0] ??
+    null;
 
   /**
    * The ceiling on this line's quantity.
@@ -86,25 +110,30 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
             </div>
             {product.images.length > 1 ? (
               <div className="d-flex flex-wrap mt-3" role="group" aria-label="Product images">
-                {product.images.map((thumb, index) => (
-                  <button
-                    key={thumb.url}
-                    type="button"
-                    className="btn p-0 mr-2 mb-2 bg-transparent border-0"
-                    onClick={() => setImageIndex(index)}
-                    aria-label={`Show image ${index + 1}`}
-                    aria-pressed={index === imageIndex}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element -- as above */}
-                    <img
-                      src={thumb.url}
-                      alt=""
-                      className={`storefront-gallery-thumb rounded${
-                        index === imageIndex ? " storefront-gallery-thumb--active" : ""
-                      }`}
-                    />
-                  </button>
-                ))}
+                {product.images.map((thumb, index) => {
+                  // Compared by url, not by index: the displayed image can come
+                  // from the selected variant, which has no index of its own.
+                  const active = thumb.url === image?.url;
+                  return (
+                    <button
+                      key={thumb.url}
+                      type="button"
+                      className="btn p-0 mr-2 mb-2 bg-transparent border-0"
+                      onClick={() => setManualImage(thumb.url)}
+                      aria-label={`Show image ${index + 1}`}
+                      aria-pressed={active}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element -- as above */}
+                      <img
+                        src={thumb.url}
+                        alt=""
+                        className={`storefront-gallery-thumb rounded${
+                          active ? " storefront-gallery-thumb--active" : ""
+                        }`}
+                      />
+                    </button>
+                  );
+                })}
               </div>
             ) : null}
           </>
@@ -162,7 +191,12 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
                   id="variant-select"
                   className="form-control storefront-select"
                   value={selected.id}
-                  onChange={(event) => setSelectedId(event.target.value)}
+                  onChange={(event) => {
+                    setSelectedId(event.target.value);
+                    // Selecting an option re-asserts the variant's own image
+                    // over any thumbnail the shopper had picked.
+                    setManualImage(null);
+                  }}
                 >
                   {product.variants.map((variant) => (
                     <option key={variant.id} value={variant.id}>

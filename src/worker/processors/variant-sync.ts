@@ -28,6 +28,7 @@ import { shopifyGraphQL } from "@/src/lib/shopify/client";
 import { PRODUCT_VARIANTS_PAGE_QUERY, VARIANTS_PER_PAGE } from "@/src/lib/shopify/queries";
 import { mapVariantsPage } from "@/src/lib/sync/product-mapper";
 import {
+  loadImageIndex,
   markVariantSyncComplete,
   saveVariantCursor,
   upsertVariants,
@@ -104,12 +105,19 @@ export async function processVariantSync(job: Job<VariantSyncPayload>): Promise<
 
       const variantsUpserted = await prisma.$transaction(
         async (tx) => {
+          // This chain never writes images -- the page job owns them -- so the
+          // index is read from what that job already stored. Variants on page 2+
+          // therefore get the same image mapping as page 1, and a product with
+          // more than one variant page is not left half-mapped.
+          const imageIdByShopifyImageId = await loadImageIndex(tx, productId);
+
           const count = await upsertVariants(tx, productId, page.variants, {
             syncRunId,
             currencyCode,
             // The product row was written by the page job from Shopify's status,
             // so it is the authority on visibility for this chain.
             productIsActive: product.isActive,
+            imageIdByShopifyImageId,
             log,
           });
 

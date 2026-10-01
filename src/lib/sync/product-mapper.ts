@@ -34,6 +34,15 @@ export interface MappedVariant {
   shopifyUpdatedAt: Date;
   /** Flattened `selectedOptions`, e.g. `Size: L / Colour: Red`. */
   selectedOptions: Array<{ name: string; value: string }>;
+  /**
+   * MediaImage GID of the image Shopify has assigned to this variant, or null
+   * when none is assigned.
+   *
+   * The same id space as `MappedImage.shopifyImageId`: Shopify draws a variant's
+   * media from the product's own media set, so this resolves to a ProductImage
+   * row rather than carrying a second copy of the URL.
+   */
+  shopifyImageId: string | null;
 }
 
 export interface MappedImage {
@@ -207,7 +216,29 @@ export function mapVariant(input: unknown, path: string, index: number): MappedV
     ] as const),
     shopifyUpdatedAt: date(node.updatedAt, `${path}.updatedAt`),
     selectedOptions,
+    shopifyImageId: mapVariantImageId(node.media, `${path}.media`),
   };
+}
+
+/**
+ * First MediaImage id from a variant's media connection, or null.
+ *
+ * Null for every shape that is not an assigned image: absent connection (an
+ * older payload, or the continuation query before this field existed), empty
+ * nodes, or a node that is not a MediaImage -- a video assigned to a variant
+ * yields `{}` through the inline fragment, and must read as "no image" rather
+ * than throwing. Returning null is what makes the storefront fall back to the
+ * product image.
+ */
+export function mapVariantImageId(media: unknown, path: string): string | null {
+  if (media === null || media === undefined) return null;
+  const list = nodes(media, path);
+  for (const [index, entry] of list.entries()) {
+    const node = obj(entry, `${path}.nodes[${index}]`);
+    const id = optionalStr(node.id, `${path}.nodes[${index}].id`);
+    if (id) return id;
+  }
+  return null;
 }
 
 /** `media.nodes` holds MediaImage entries; anything else (video) is skipped. */

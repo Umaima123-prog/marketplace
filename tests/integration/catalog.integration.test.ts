@@ -424,3 +424,95 @@ describe("product detail", () => {
     }
   });
 });
+
+/**
+ * What the detail page receives for a variant's image.
+ *
+ * The storefront never joins anything itself: the service resolves the variant's
+ * assigned image, or null, and the panel's precedence rule turns null into the
+ * product-image fallback. These tests pin the service half.
+ */
+describe("variant images in the detail view", () => {
+  /** Seeds a product, then assigns image N to variant N by local id. */
+  async function seedWithVariantImages(handle: string, assignments: Array<number | null>) {
+    await seedProduct({
+      handle,
+      images: [
+        { url: "https://cdn/black.jpg", altText: "black" },
+        { url: "https://cdn/white.jpg", altText: "white" },
+      ],
+      variants: assignments.map((_, index) => ({ price: `${10 + index}.00`, title: `Option ${index + 1}` })),
+    });
+
+    const stored = await db.product.findUniqueOrThrow({
+      where: { handle },
+      include: {
+        images: { orderBy: { position: "asc" } },
+        variants: { orderBy: { position: "asc" } },
+      },
+    });
+
+    for (const [index, imageIndex] of assignments.entries()) {
+      if (imageIndex === null) continue;
+      await db.productVariant.update({
+        where: { id: stored.variants[index].id },
+        data: { imageId: stored.images[imageIndex].id },
+      });
+    }
+    return stored;
+  }
+
+  it("returns each variant's own assigned image", async () => {
+    await seedWithVariantImages("two-colours", [0, 1]);
+
+    const product = await getProductByHandle("two-colours");
+    expect(product).not.toBeNull();
+    expect(product!.variants.map((v) => v.image?.url)).toEqual([
+      "https://cdn/black.jpg",
+      "https://cdn/white.jpg",
+    ]);
+    // Alt text travels with it, so the rendered image stays described.
+    expect(product!.variants[1].image?.altText).toBe("white");
+  });
+
+  it("returns null for a variant with no assigned image, so the page can fall back", async () => {
+    await seedWithVariantImages("one-assigned", [0, null]);
+
+    const product = await getProductByHandle("one-assigned");
+    expect(product!.variants[0].image?.url).toBe("https://cdn/black.jpg");
+    expect(product!.variants[1].image).toBeNull();
+    // The fallback the panel uses is the product's first image, which is present.
+    expect(product!.images[0].url).toBe("https://cdn/black.jpg");
+  });
+
+  it("returns null for every variant when nothing is assigned", async () => {
+    await seedWithVariantImages("none-assigned", [null, null]);
+
+    const product = await getProductByHandle("none-assigned");
+    expect(product!.variants.every((v) => v.image === null)).toBe(true);
+    expect(product!.images).toHaveLength(2);
+  });
+
+  it("resolves a variant image to one of the product's own image rows", async () => {
+    // Not a copied URL: the same row the gallery renders, so the two cannot
+    // disagree about one image.
+    await seedWithVariantImages("same-rows", [1, 1]);
+
+    const product = await getProductByHandle("same-rows");
+    const galleryUrls = product!.images.map((i) => i.url);
+    for (const variant of product!.variants) {
+      expect(galleryUrls).toContain(variant.image!.url);
+    }
+  });
+
+  it("adds no image field to the listing view model", async () => {
+    // Cards show one product image; a per-variant image there would be a column
+    // fetched for nothing.
+    await seedWithVariantImages("listing-shape", [0, 1]);
+
+    const { products } = await listProducts();
+    const card = products.find((c) => c.handle === "listing-shape");
+    expect(card).toBeDefined();
+    expect(Object.keys(card!)).not.toContain("variantImage");
+  });
+});

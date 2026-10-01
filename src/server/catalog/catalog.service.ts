@@ -43,6 +43,14 @@ export interface VariantView {
   available: boolean;
   /** Shown only when tracked; null means "not tracked", not "zero". */
   inventoryQuantity: number | null;
+  /**
+   * The image Shopify assigned to this variant, or null when it has none.
+   *
+   * Null is the common case and is not an error: the detail page falls back to
+   * the product's first image. Resolved from the variant's `ProductImage`
+   * relation, so the URL is the same row the gallery renders.
+   */
+  image: ProductImageView | null;
 }
 
 export interface ProductCardView {
@@ -171,6 +179,11 @@ const DETAIL_SELECT = {
       inventoryTracked: true,
       inventoryPolicy: true,
       isActive: true,
+      // The variant's assigned image, as a nested select rather than a second
+      // query. Prisma resolves this relation in one additional query for the
+      // whole product, and it reads the same ProductImage rows as `images`
+      // above -- so a variant image and its gallery entry can never disagree.
+      image: { select: { url: true, altText: true } },
     },
     orderBy: { position: "asc" },
   },
@@ -343,6 +356,7 @@ export function toDetail(row: DetailRow): ProductDetailView {
     currencyCode: variant.currencyCode,
     available: isPurchasable(variant),
     inventoryQuantity: variant.inventoryTracked ? variant.inventoryQuantity : null,
+    image: variant.image,
   })).map((view) => ({
     ...view,
     compareAtPrice:

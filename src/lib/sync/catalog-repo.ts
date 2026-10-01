@@ -138,12 +138,21 @@ export async function upsertProduct(
     { shopifyProductId: mapped.shopifyProductId, entity: "product" },
   );
 
+  // Images BEFORE variants, because a variant now references a ProductImage row
+  // by local id. Written the other way round, a brand-new product's variants
+  // would find no image to point at and their mapping would stay null until the
+  // next sync -- correct eventually, wrong on the run that created them. Both
+  // writes are inside the caller's transaction, so the order is free.
+  const imagesUpserted = await reconcileImages(db, product.id, mapped.images);
+  const imageIdByShopifyImageId = await loadImageIndex(db, product.id);
+
   const variantsUpserted = await upsertVariants(db, product.id, mapped.variants, {
     syncRunId: options.syncRunId,
     currencyCode: options.currencyCode,
     // The same condition the product row was just written with, so parent and
     // children cannot disagree within one upsert.
     productIsActive: mapped.status === "ACTIVE",
+    imageIdByShopifyImageId,
     now,
     log,
   });
@@ -170,8 +179,6 @@ export async function upsertProduct(
     );
   }
 
-  const imagesUpserted = await reconcileImages(db, product.id, mapped.images);
-
   return { productId: product.id, applied: true, variantsUpserted, imagesUpserted, variantsDeactivated };
 }
 
@@ -193,6 +200,16 @@ export async function upsertVariants(
      * file's own sweep comment relies on.
      */
     productIsActive: boolean;
+    /**
+     * MediaImage GID -> local `ProductImage.id`, for this product only.
+     *
+     * Supplied by the caller rather than queried here, so one lookup serves a
+     * whole product's variants instead of one per variant. Omit it and no
+     * variant image mapping is written -- which is the correct behaviour for a
+     * caller that has not reconciled images, not a silent half-state: an absent
+     * index leaves the column untouched rather than clearing it.
+     */
+    imageIdByShopifyImageId?: Map<string, string>;
     now?: Date;
     log?: Logger;
   },
@@ -236,6 +253,7 @@ export async function upsertVariants(
       shopifyUpdatedAt: variant.shopifyUpdatedAt,
       lastSyncRunId: options.syncRunId,
       syncedAt: now,
+      ...resolveVariantImage(variant.shopifyImageId, options.imageIdByShopifyImageId),
     };
 
     await withUniqueRetry(
@@ -260,6 +278,48 @@ export async function upsertVariants(
   }
 
   return count;
+}
+
+/**
+ * MediaImage GID -> local `ProductImage.id` for one product.
+ *
+ * Read after the images are reconciled, so it reflects exactly the rows that now
+ * exist: an image Shopify dropped is already deleted and therefore absent here,
+ * and a variant still naming it resolves to null rather than to a dangling id.
+ */
+export async function loadImageIndex(db: Db, productId: string): Promise<Map<string, string>> {
+  const rows = await db.productImage.findMany({
+    where: { productId },
+    select: { id: true, shopifyImageId: true },
+  });
+  return new Map(rows.map((row) => [row.shopifyImageId, row.id]));
+}
+
+/**
+ * The `imageId` fragment of a variant's writable data.
+ *
+ * Three cases, and the difference between the last two is the one that matters:
+ *
+ * - **No index supplied** -> write nothing. The caller has not reconciled this
+ *   product's images, so it has no basis to assert either an image or its
+ *   absence, and an `imageId: null` here would wipe a correct mapping. This is
+ *   what keeps a partial payload from corrupting the mapping.
+ * - **Index supplied, variant has no assigned image** -> `imageId: null`. An
+ *   authoritative "none": Shopify was asked and said this variant has no image,
+ *   so a previously-assigned one must be cleared or the storefront would keep
+ *   showing a stale variant image.
+ * - **Index supplied, variant names an image** -> that row's local id, or null
+ *   when the id is not among the product's images. Null rather than a throw: a
+ *   variant naming media that is not in the product's set is a Shopify state we
+ *   do not control, and the fallback renders correctly.
+ */
+export function resolveVariantImage(
+  shopifyImageId: string | null,
+  index: Map<string, string> | undefined,
+): { imageId?: string | null } {
+  if (!index) return {};
+  if (!shopifyImageId) return { imageId: null };
+  return { imageId: index.get(shopifyImageId) ?? null };
 }
 
 /**

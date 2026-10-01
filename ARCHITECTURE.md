@@ -357,6 +357,7 @@ single `evaluateLine` rule. A shopper who defeats all of this still cannot buy a
 | Quantity ceiling | `ProductPurchasePanel.tsx` | `min(MAX_LINE_QUANTITY, inventoryQuantity)` when the variant is tracked and in stock; the per-line cap of **99** otherwise. An untracked variant, or a tracked one at zero that is still purchasable (`inventoryPolicy = CONTINUE`), is not limited by stock |
 | The ceiling is enforced by clamping, not by the input | `ProductPurchasePanel.tsx` | The quantity is clamped on every render, so switching from a 20-stock option to a 15-stock one cannot leave 20 in the field for a frame. `max` on the `<input>` is a convenience; the clamp is the rule, and it is the only value the component ever reads |
 | Nothing about money crosses into the cart | `ProductPurchasePanel.tsx` | Add to Cart passes `(variantId, quantity)`. The price beside the button is display only; the cart page and the checkout each re-read it from MySQL |
+| Variant-specific image | `catalog.service.ts`, `ProductPurchasePanel.tsx` | Selecting a variant also swaps the main image to the one Shopify assigned it, falling back to the product's first image when it has none. Precedence is: a thumbnail the shopper just picked, then the variant's image, then the product's. Selecting an option clears the thumbnail override, so the image always follows the selection |
 
 The panel is the only client component on the storefront, and selection changes issue **no request**
 — every variant's price, compare-at, SKU and availability arrives with the page.
