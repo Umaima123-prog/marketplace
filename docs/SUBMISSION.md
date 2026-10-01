@@ -27,7 +27,7 @@ storefront's source of truth and a separate worker process owning every Shopify 
 
 | Check | Result |
 |---|---|
-| `npm test` | **322 passed** (22 files) |
+| `npm test` | **333 passed** (23 files) |
 | `npm run test:integration` | **210 passed** (7 files, real MySQL + real Redis) |
 | `npm run typecheck` | clean |
 | `npm run lint` | clean — 0 errors, 0 warnings |

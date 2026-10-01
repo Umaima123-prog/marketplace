@@ -14,7 +14,7 @@ this document comes from running the command or query shown, not from the video.
 
 | Command | Result |
 |---|---|
-| `npm test` | **322 passed**, 22 files |
+| `npm test` | **333 passed**, 23 files |
 | `npm run test:integration` | **210 passed**, 7 files (real MySQL + real Redis) |
 | `npm run typecheck` | clean (`tsc --noEmit`, no output) |
 | `npm run lint` | clean — 0 errors, 0 warnings |
@@ -29,7 +29,7 @@ database first, and the harness **refuses to start** unless `TEST_DATABASE_URL` 
 ending in `_test` — those tests `TRUNCATE` every table, and a bypass flag is a flag someone will
 set.
 
-## 2. Unit suite (322 tests, 22 files)
+## 2. Unit suite (333 tests, 23 files)
 
 Pure logic, fixtures and fake clients.
 
@@ -358,12 +358,30 @@ than relying on a long-held transaction. Atomicity, variant reconciliation, imag
 the variant-image mapping, the incomplete-pagination gate and the final sweep are all unchanged — the
 fix changed two timeouts and nothing else.
 
+### Both processes in one service
+
+The architecture requires the worker to be a separate **process** from Next (§2); it does not
+require a separate host service. A Railway trial cannot provision a second service, so one service
+supervises both via `scripts/start-production.mjs`, started with `npm run start:production`.
+
+`next start & npm run worker` would not do: the shell becomes PID 1 and forwards no signals, so a
+deploy's SIGTERM never reaches the worker and its in-flight jobs lose their lock instead of being
+released; and a shell reports its own exit status, so a dead worker would leave the web process
+serving while orders silently accumulate in `PENDING_SYNC`. The launcher instead forwards signals to
+each child's whole process **group** (`npm run worker` is npm spawning node, so signalling npm alone
+would orphan the worker), treats either child's unexpected exit -- including a clean one -- as a
+service failure, and exits non-zero so Railway restarts.
+
+`tsx` moved from `devDependencies` to `dependencies` as part of this: the worker starts with
+`node --import tsx` and resolves `@/src/...` path aliases that only tsx provides, and a production
+install omits devDependencies. Its placement was only ever correct while the worker never ran in
+production.
+
 ### Not yet in production
 
-- **No worker service is deployed.** Only the web service runs. The sync runs above were driven by a
-  worker started locally against the production environment, which has the same latency profile.
-  Until a worker service exists, no catalog sync and no order submission happen on their own, and an
-  order placed in production would sit in `PENDING_SYNC`.
+- **Nothing drains the outbox if the worker is down.** The launcher makes that loud rather than
+  silent -- a dead worker takes the service down and Railway restarts it -- but a persistent worker
+  failure still means orders sit in `PENDING_SYNC` until it recovers.
 - **Repeatable sync schedulers are registered in the production Redis**, so any worker that connects
   begins syncing every 15 minutes. The manual `FULL` trigger issued during this verification
   correctly reported `sync_skipped: already_running`, which is the database lock doing its job.
