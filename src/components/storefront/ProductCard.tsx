@@ -21,11 +21,11 @@ export function ProductCard({ product }: { product: ProductCardView }) {
     : null;
 
   return (
-    <div className="card h-100">
+    <div className="card h-100 storefront-card">
       {/*
         A product with no image is normal, not an error: Shopify does not
-        require one. A placeholder of the same height keeps the grid aligned
-        instead of letting one card collapse.
+        require one. A placeholder of the same square shape keeps the grid
+        aligned instead of letting one card collapse.
       */}
       {product.image ? (
         // Shopify's CDN hosts these at arbitrary remote paths; next/image would
@@ -45,33 +45,37 @@ export function ProductCard({ product }: { product: ProductCardView }) {
       )}
 
       <div className="card-body d-flex flex-column">
-        {product.vendor ? (
-          <p className="text-muted text-uppercase small mb-1">{product.vendor}</p>
-        ) : null}
+        {product.vendor ? <p className="storefront-card-vendor">{product.vendor}</p> : null}
 
-        <h2 className="h6 card-title mb-2">{product.title}</h2>
+        <h2 className="storefront-card-title">{product.title}</h2>
 
         <p className="mb-2">
-          {product.variantCount > 1 ? <span className="text-muted small mr-1">from</span> : null}
-          <span className="font-weight-bold">{price}</span>
+          {/*
+            "From" only when the purchasable variants actually differ in price.
+            `variantCount > 1` was the wrong test: two options at the same price
+            are not a range, and saying "from" implies a cheaper one exists.
+          */}
+          {product.priceVaries ? <span className="storefront-card-from">From</span> : null}
+          <span className="storefront-card-price">{price}</span>
           {compareAt ? <span className="ml-2 small storefront-price-compare">{compareAt}</span> : null}
         </p>
 
         {/*
-          Availability is a property of the variants, computed server-side. An
+          Availability is a property of the variants, computed server-side: the
+          product is sold out exactly when no active variant can be bought. An
           unavailable product still links through -- the detail page explains
-          which variants are out of stock, which is more useful than a dead card.
+          which options are out of stock, which is more useful than a dead card.
         */}
         <p className="mb-3">
           {product.available ? (
             <span className="badge badge-success">In stock</span>
           ) : (
-            <span className="badge badge-secondary">Out of stock</span>
+            <span className="badge badge-danger">Sold Out</span>
           )}
         </p>
 
         <Link className="btn btn-primary btn-block mt-auto" href={`/products/${product.handle}`}>
-          View product
+          View Product
         </Link>
       </div>
     </div>

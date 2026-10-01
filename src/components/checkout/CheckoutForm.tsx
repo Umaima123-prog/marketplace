@@ -23,6 +23,7 @@ import Link from "next/link";
 
 import { describeProblem, type LineProblem } from "@/src/lib/cart/cart-view";
 import { formatMoney } from "@/src/lib/money";
+import { normalizePhone } from "@/src/lib/phone";
 import { serializeCart } from "@/src/lib/cart/cart-state";
 
 import { useCart } from "@/src/components/cart/CartProvider";
@@ -134,7 +135,11 @@ export function CheckoutForm() {
   function localErrors(): Record<string, string> {
     const errors: Record<string, string> = {};
     if (form.customerName.trim().length === 0) errors.customerName = "Name is required";
-    if (form.customerPhone.trim().length === 0) errors.customerPhone = "Phone number is required";
+    // The same function the schema runs, so the two cannot disagree about what a
+    // valid number is. This copy only saves a round trip; the server still
+    // decides, and it re-validates whatever arrives.
+    const phone = normalizePhone(form.customerPhone);
+    if (!phone.ok) errors.customerPhone = phone.message;
     if (form.addressLine1.trim().length === 0) errors.addressLine1 = "Address is required";
     if (form.city.trim().length === 0) errors.city = "City is required";
     if (form.countryCode.trim().length !== 2) errors.countryCode = "Select a country";
@@ -238,11 +243,12 @@ export function CheckoutForm() {
 
   if (cart.lines.length === 0) {
     return (
-      <div className="card">
-        <div className="card-body text-center">
-          <p className="mb-3">Your cart is empty, so there is nothing to check out.</p>
+      <div className="card storefront-card">
+        <div className="card-body text-center py-5">
+          <h2 className="h5">Nothing to check out</h2>
+          <p className="text-muted">Your cart is empty.</p>
           <Link className="btn btn-primary" href="/">
-            Browse the catalog
+            Continue Shopping
           </Link>
         </div>
       </div>
@@ -256,8 +262,8 @@ export function CheckoutForm() {
   return (
     <form onSubmit={onSubmit} noValidate>
       <div className="row">
-        <div className="col-lg-7">
-          <div className="card">
+        <div className="col-lg-7 mb-4 mb-lg-0">
+          <div className="card storefront-card">
             <div className="card-header">
               <h3 className="card-title">Delivery details</h3>
             </div>
@@ -281,7 +287,7 @@ export function CheckoutForm() {
                   value={form.customerPhone}
                   error={fieldErrors.customerPhone}
                   autoComplete="tel"
-                  hint="The courier calls this number before delivery."
+                  hint="The courier calls this number. Include your country code, e.g. +92 300 1234567."
                   onChange={(value) => set("customerPhone", value)}
                 />
               </div>
@@ -383,7 +389,7 @@ export function CheckoutForm() {
             </div>
           </div>
 
-          <div className="card">
+          <div className="card storefront-card mb-0">
             <div className="card-header">
               <h3 className="card-title">Payment</h3>
             </div>
@@ -393,7 +399,7 @@ export function CheckoutForm() {
                 group with a single option invites a second one to be added in the
                 UI before the server knows how to charge for it.
               */}
-              <p className="mb-1 font-weight-bold">Cash on delivery</p>
+              <p className="storefront-cod-chip mb-2">Cash on delivery</p>
               <p className="text-muted small mb-0">
                 Pay the courier in cash when your order arrives. No card details are collected.
               </p>
@@ -402,7 +408,7 @@ export function CheckoutForm() {
         </div>
 
         <div className="col-lg-5">
-          <div className="card">
+          <div className="card storefront-card storefront-sticky">
             <div className="card-header">
               <h3 className="card-title">Your order</h3>
             </div>
@@ -412,9 +418,9 @@ export function CheckoutForm() {
                   {hydrated.lines.map((line) => (
                     <tr key={line.variantId} className={line.problem ? "table-warning" : undefined}>
                       <td>
-                        {line.productTitle}
+                        <span className="font-weight-bold">{line.productTitle}</span>
                         {line.variantTitle ? (
-                          <span className="text-muted small"> · {line.variantTitle}</span>
+                          <div className="text-muted small">{line.variantTitle}</div>
                         ) : null}
                         <div className="text-muted small">Qty {line.quantity}</div>
                         {line.problem ? (
@@ -443,8 +449,10 @@ export function CheckoutForm() {
                 <dd className="col-5 text-right text-muted">
                   {formatMoney("0.00", hydrated.currencyCode)}
                 </dd>
-                <dt className="col-7 font-weight-bold border-top pt-2">Total due on delivery</dt>
-                <dd className="col-5 text-right font-weight-bold border-top pt-2">
+                <dt className="col-7 storefront-summary-total border-top pt-3 mt-2">
+                  Total due on delivery
+                </dt>
+                <dd className="col-5 text-right storefront-summary-total border-top pt-3 mt-2">
                   {formatMoney(hydrated.subtotal, hydrated.currencyCode)}
                 </dd>
               </dl>
@@ -471,7 +479,11 @@ export function CheckoutForm() {
                 </div>
               ) : null}
 
-              <button type="submit" className="btn btn-primary btn-block" disabled={!canSubmit}>
+              <button
+                type="submit"
+                className="btn btn-primary btn-block storefront-cta"
+                disabled={!canSubmit}
+              >
                 {submitting ? "Placing your order…" : "Place order"}
               </button>
               <p className="text-muted small mb-0 mt-2">

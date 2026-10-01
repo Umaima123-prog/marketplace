@@ -16,7 +16,12 @@ export function StorefrontLayout({
   breadcrumb,
   children,
 }: {
-  title: string;
+  /**
+   * Omit to suppress the page header entirely. The catalog page leads with a
+   * hero that already names the store, and a "Catalog" heading above it would be
+   * a second title saying less.
+   */
+  title?: string;
   subtitle?: string;
   breadcrumb?: ReactNode;
   children: ReactNode;
@@ -26,19 +31,21 @@ export function StorefrontLayout({
       <Navbar />
 
       <div className="content-wrapper" style={{ marginLeft: 0 }}>
-        <div className="content-header">
-          <div className="container">
-            <div className="row mb-2 align-items-center">
-              <div className="col-sm-8">
-                <h1 className="m-0 h3">{title}</h1>
-                {subtitle ? <p className="text-muted mb-0">{subtitle}</p> : null}
+        {title ? (
+          <div className="content-header">
+            <div className="container">
+              <div className="row mb-2 align-items-center">
+                <div className="col-sm-8">
+                  <h1 className="m-0 h3">{title}</h1>
+                  {subtitle ? <p className="text-muted mb-0">{subtitle}</p> : null}
+                </div>
+                {breadcrumb ? <div className="col-sm-4">{breadcrumb}</div> : null}
               </div>
-              {breadcrumb ? <div className="col-sm-4">{breadcrumb}</div> : null}
             </div>
           </div>
-        </div>
+        ) : null}
 
-        <section className="content">
+        <section className="content pt-3">
           <div className="container">{children}</div>
         </section>
       </div>

@@ -20,11 +20,230 @@
  * the import order in layout.tsx keeps the cascade the same.
  */
 
-/* Storefront-specific touches. Namespaced so they cannot collide with AdminLTE. */
+/*
+ * Storefront-specific touches. Every selector is namespaced `storefront-` so it
+ * cannot collide with AdminLTE's or Bootstrap's own classes, and everything here
+ * is additive: no AdminLTE rule is replaced, so the base theme stays intact.
+ *
+ * A few local custom properties rather than literals scattered through the file,
+ * so the accent colour and the card shape are each defined once.
+ */
+:root {
+  --storefront-accent: #2563eb;
+  --storefront-ink: #1f2d3d;
+  --storefront-muted: #6b7a8d;
+  --storefront-line: #e3e7ee;
+  --storefront-surface: #ffffff;
+  --storefront-tile: #f5f7fa;
+  --storefront-radius: 0.5rem;
+}
+
+/* --- page chrome ----------------------------------------------------------- */
+
+/*
+ * AdminLTE's navbar is built for a dashboard, where the brand is one item among
+ * many. A storefront header has a brand, a thin nav and the cart, so the only
+ * additions are a slightly taller bar and a real brand mark.
+ */
+.storefront-navbar {
+  min-height: 3.75rem;
+  box-shadow: 0 1px 3px rgba(31, 45, 61, 0.08);
+}
+
+.storefront-brand {
+  display: inline-flex;
+  align-items: center;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--storefront-ink);
+}
+
+.storefront-brand:hover,
+.storefront-brand:focus {
+  color: var(--storefront-accent);
+}
+
+.storefront-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.875rem;
+  height: 1.875rem;
+  margin-right: 0.5rem;
+  border-radius: var(--storefront-radius);
+  background: var(--storefront-accent);
+  color: #fff;
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+.storefront-cart-link {
+  font-weight: 600;
+  color: var(--storefront-ink);
+}
+
+.storefront-cod-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1875rem 0.5rem;
+  border: 1px solid var(--storefront-line);
+  border-radius: 999px;
+  background: var(--storefront-tile);
+  color: var(--storefront-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* --- hero ------------------------------------------------------------------ */
+
+.storefront-hero {
+  border: 1px solid var(--storefront-line);
+  border-radius: var(--storefront-radius);
+  background: linear-gradient(135deg, #f7f9fc 0%, #eef2f9 100%);
+  padding: 2.25rem 1.5rem;
+  margin-bottom: 1.75rem;
+}
+
+.storefront-hero-title {
+  font-size: 1.875rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--storefront-ink);
+  margin-bottom: 0.5rem;
+}
+
+.storefront-hero-lead {
+  color: var(--storefront-muted);
+  max-width: 44rem;
+  margin-bottom: 0;
+}
+
+.storefront-hero-points {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.storefront-hero-points li {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0.5rem 0.5rem 0;
+  padding: 0.3125rem 0.6875rem;
+  border: 1px solid var(--storefront-line);
+  border-radius: 999px;
+  background: var(--storefront-surface);
+  color: var(--storefront-ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+@media (min-width: 768px) {
+  .storefront-hero {
+    padding: 2.75rem 2.5rem;
+  }
+
+  .storefront-hero-title {
+    font-size: 2.25rem;
+  }
+}
+
+/* --- section headings ------------------------------------------------------ */
+
+.storefront-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding-bottom: 0.625rem;
+  border-bottom: 1px solid var(--storefront-line);
+}
+
+.storefront-section-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--storefront-ink);
+  margin: 0;
+}
+
+.storefront-section-count {
+  color: var(--storefront-muted);
+  font-size: 0.875rem;
+}
+
+/* --- product card ---------------------------------------------------------- */
+
+.storefront-card {
+  border: 1px solid var(--storefront-line);
+  border-radius: var(--storefront-radius);
+  box-shadow: none;
+  transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+
+.storefront-card:hover,
+.storefront-card:focus-within {
+  border-color: #cfd8e6;
+  box-shadow: 0 0.5rem 1.25rem rgba(31, 45, 61, 0.1);
+  transform: translateY(-2px);
+}
+
+/*
+ * Square image tiles, so a grid of photos with differing aspect ratios still
+ * lines up. `contain` rather than `cover`: cropping a product photo can cut the
+ * product out of its own picture.
+ */
 .storefront-card-image {
-  height: 220px;
+  aspect-ratio: 1 / 1;
+  width: 100%;
   object-fit: contain;
-  background: #f8f9fa;
+  background: var(--storefront-tile);
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--storefront-line);
+}
+
+/*
+ * `aspect-ratio` is widely supported, but a fixed fallback keeps an older
+ * browser from collapsing the tile to no height at all.
+ */
+@supports not (aspect-ratio: 1 / 1) {
+  .storefront-card-image {
+    height: 240px;
+  }
+}
+
+.storefront-card-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--storefront-ink);
+  margin-bottom: 0.375rem;
+}
+
+.storefront-card-vendor {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--storefront-muted);
+  margin-bottom: 0.25rem;
+}
+
+.storefront-card-price {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--storefront-ink);
+}
+
+.storefront-card-from {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--storefront-muted);
+  margin-right: 0.25rem;
 }
 
 .storefront-card-image--placeholder {
@@ -34,23 +253,133 @@
   color: #adb5bd;
 }
 
-.storefront-gallery-main {
-  max-height: 420px;
+/* --- product detail -------------------------------------------------------- */
+
+.storefront-detail-media {
+  border: 1px solid var(--storefront-line);
+  border-radius: var(--storefront-radius);
+  background: var(--storefront-tile);
+  padding: 1rem;
+}
+
+.storefront-detail-title {
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--storefront-ink);
+  margin-bottom: 0.25rem;
+}
+
+.storefront-detail-price {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--storefront-ink);
+}
+
+.storefront-detail-sku {
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  color: var(--storefront-muted);
+}
+
+.storefront-option-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--storefront-muted);
+  margin-bottom: 0.375rem;
+}
+
+.storefront-select,
+.storefront-quantity {
+  height: calc(2.75rem + 2px);
+  border-color: #cfd8e6;
+  border-radius: var(--storefront-radius);
+  font-weight: 600;
+  color: var(--storefront-ink);
+}
+
+.storefront-quantity {
+  max-width: 7rem;
+}
+
+/* The primary action on the page, so it is deliberately the heaviest element. */
+.storefront-cta {
+  height: calc(3rem + 2px);
+  border-radius: var(--storefront-radius);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+/*
+ * A disabled CTA is greyed rather than faded: Bootstrap's default is the same
+ * blue at 65% opacity, which still reads as the button you are meant to press.
+ */
+.storefront-cta:disabled {
+  opacity: 1;
+  background: #e5e9f0;
+  border-color: #e5e9f0;
+  color: #98a4b5;
+  cursor: not-allowed;
+}
+
+/* --- cart and checkout ----------------------------------------------------- */
+
+.storefront-line-thumb {
+  width: 3.75rem;
+  height: 3.75rem;
   object-fit: contain;
-  background: #f8f9fa;
+  background: var(--storefront-tile);
+  border: 1px solid var(--storefront-line);
+  border-radius: 0.375rem;
+}
+
+.storefront-summary-total {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--storefront-ink);
+}
+
+/*
+ * The order summary follows the shopper down a long delivery form. `sticky` is
+ * inert when the column is shorter than the viewport, so no height is forced.
+ * Below lg the two columns stack, where a stuck summary would cover the form, so
+ * it only sticks at the width at which it sits beside it.
+ */
+@media (min-width: 992px) {
+  .storefront-sticky {
+    position: sticky;
+    top: 1rem;
+  }
+}
+
+/*
+ * The detail image is the largest thing on the page. It sits inside
+ * `.storefront-detail-media`, which supplies the tile background and padding, so
+ * no background is set here -- two of them would show as a border.
+ */
+.storefront-gallery-main {
   width: 100%;
+  height: 26rem;
+  max-height: 60vh;
+  object-fit: contain;
 }
 
 .storefront-gallery-thumb {
   width: 72px;
   height: 72px;
-  object-fit: cover;
+  object-fit: contain;
+  background: var(--storefront-tile);
   cursor: pointer;
-  border: 2px solid transparent;
+  border: 2px solid var(--storefront-line);
 }
 
 .storefront-gallery-thumb--active {
-  border-color: #007bff;
+  border-color: var(--storefront-accent);
 }
 
 .storefront-price-compare {

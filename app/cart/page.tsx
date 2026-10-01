@@ -25,7 +25,7 @@ export default function CartPage() {
       breadcrumb={
         <ol className="breadcrumb float-sm-right bg-transparent p-0 mb-0">
           <li className="breadcrumb-item">
-            <Link href="/">Catalog</Link>
+            <Link href="/">Electronics</Link>
           </li>
           <li className="breadcrumb-item active">Cart</li>
         </ol>

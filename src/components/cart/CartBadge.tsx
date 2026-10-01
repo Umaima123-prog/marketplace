@@ -16,7 +16,7 @@ export function CartBadge() {
   const { count, ready } = useCart();
 
   return (
-    <Link className="nav-link" href="/cart">
+    <Link className="nav-link storefront-cart-link" href="/cart">
       Cart
       {ready && count > 0 ? (
         <span className="badge badge-primary ml-1" aria-label={`${count} items in cart`}>

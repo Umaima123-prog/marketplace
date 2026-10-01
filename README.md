@@ -13,7 +13,7 @@ Two rules shape the whole design:
    immediately before the order is written.
 
 Status: the product sync, storefront, cart, COD checkout and asynchronous order submission are
-implemented and tested, and one real order has been taken end to end on a development store.
+implemented and tested, and real orders have been taken end to end on a development store.
 Webhooks and an admin UI are not built. Known gaps are listed in
 [Known limitations](#known-limitations) and in detail in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -246,7 +246,9 @@ marked rather than silently dropped, and it blocks checkout.
 **Checkout** (`/checkout` → `POST /api/checkout`):
 
 1. strict zod validation — the schema has **no money field at all**, so a browser sending
-   `price` gets a 400 rather than a silently ignored key
+   `price` gets a 400 rather than a silently ignored key. The phone number is validated and
+   normalised to E.164 at this step, so a number Shopify would refuse never reaches a committed
+   order
 2. idempotency lookup, compared against a `requestFingerprint` **before** anything is returned
 3. every variant re-read from MySQL: active variant, active product, stock re-checked
 4. totals computed here with `Decimal`; shipping 0, tax 0, `grandTotal = subtotal`

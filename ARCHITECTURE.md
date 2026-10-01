@@ -16,7 +16,7 @@ no checkout, no order submission yet.
 | Queue | Redis + BullMQ |
 | Catalog source | Shopify Admin **GraphQL** API, version **pinned in configuration** (`SHOPIFY_API_VERSION`) |
 | Shopify app | Single **development store**, custom app with an Admin API access token — **no OAuth install flow** |
-| Admin UI | AdminLTE v3.2.0 (static assets in `public/adminlte`) |
+| UI foundation | AdminLTE v3.2.0, CSS only, vendored at `vendor/adminlte/adminlte.min.css` (F3) |
 | Payment | **Cash on Delivery only** — no gateway, no card data, no PCI scope |
 | Order creation | `draftOrderCreate` → `draftOrderComplete(paymentPending: true)` |
 | Tax / shipping | **Out of scope** — both fixed at `0`. Local subtotal is authoritative |
@@ -343,6 +343,24 @@ one additional query, so it is three queries regardless of product count, not 1 
 handles the trailing `publishedAt IS NULL` group explicitly -- `publishedAt < x` is NULL, not
 true, for those rows.
 
+### 3a.1a Purchase rules on the storefront
+
+Every rule below is **presentation, never authorisation**. The browser decides what to *show*; the
+server decides what may be *sold*, and re-reads every variant from MySQL at checkout through the
+single `evaluateLine` rule. A shopper who defeats all of this still cannot buy a sold-out variant.
+
+| Rule | Where | Behaviour |
+|---|---|---|
+| Sold out, per product | `toCard` in `catalog.service.ts` | `available` is true when **any** active variant is purchasable. False renders a *Sold Out* badge on the card. The product is still listed and still links through — the detail page explains which option is out of stock, which is more useful than a dead card |
+| "From" pricing | `priceVaries` in `catalog.service.ts` | True only when the active variants differ in price, so `From $X` appears only where a range exists. `variantCount > 1` was the wrong test: two options at one price are not a range, and "from" would imply a cheaper option exists |
+| Sold out, per variant | `ProductPurchasePanel.tsx` | Selecting a variant moves price, SKU and availability together. An unpurchasable selection shows a *Sold Out* badge, disables the quantity field, and relabels the greyed CTA *Sold Out*; switching back re-enables it |
+| Quantity ceiling | `ProductPurchasePanel.tsx` | `min(MAX_LINE_QUANTITY, inventoryQuantity)` when the variant is tracked and in stock; the per-line cap of **99** otherwise. An untracked variant, or a tracked one at zero that is still purchasable (`inventoryPolicy = CONTINUE`), is not limited by stock |
+| The ceiling is enforced by clamping, not by the input | `ProductPurchasePanel.tsx` | The quantity is clamped on every render, so switching from a 20-stock option to a 15-stock one cannot leave 20 in the field for a frame. `max` on the `<input>` is a convenience; the clamp is the rule, and it is the only value the component ever reads |
+| Nothing about money crosses into the cart | `ProductPurchasePanel.tsx` | Add to Cart passes `(variantId, quantity)`. The price beside the button is display only; the cart page and the checkout each re-read it from MySQL |
+
+The panel is the only client component on the storefront, and selection changes issue **no request**
+— every variant's price, compare-at, SKU and availability arrives with the page.
+
 ### 3a.2 Current catalog (electronics)
 
 The Shopify demo seed catalog was replaced with a 10-product electronics catalog. Products were
@@ -352,12 +370,19 @@ storefront, and no sync code changed to accommodate them.
 | Current state | Value |
 |---|---|
 | Storefront-visible products (`isActive AND status = ACTIVE`) | **10** |
-| Active variants across them | **14** — four products keep two variants (keyboard, smartwatch, USB-C hub, power bank), the other six keep one |
+| Active variants across them | **19** — nine products carry two variants, the webcam one |
 | Products with at least one synced image | **10 / 10** (one image each, Shopify CDN) |
-| Inventory total across the 14 active variants | **356** |
+| Inventory total across the 19 active variants | **319** |
+| Products with every active variant at zero stock | **2** (ClearView webcam, SnapCharge charger) — shown as *Sold Out*, not hidden |
 | Former seed products | **archived in Shopify**, retained locally as inactive rows |
 | Former seed variants | **26, all inactive** (`deactivationReason = SHOPIFY_STATUS`) |
-| Variants deleted in Shopify during catalog tidy-up | **5**, retained locally as inactive rows (`deactivationReason = MISSING_FROM_SYNC`) |
+| Variants deleted in Shopify during the earlier catalog tidy-up | **5** inactive rows remain (`deactivationReason = MISSING_FROM_SYNC`) |
+
+The five `MISSING_FROM_SYNC` rows are the earlier tidy-up's; the same five option names were later
+re-created in Shopify as part of the final variant spec, so each arrived as a **new** variant with a
+new Shopify id. A SKU such as `ELS-GRY` therefore exists on two local rows — one inactive row still
+referenced by a historical `OrderItem`, and one active row the storefront sells. Nothing looks a
+variant up by bare SKU, so this is history being preserved rather than ambiguity.
 
 Nothing was deleted on either side: archiving is `productUpdate(status: ARCHIVED)` in Shopify, and the
 sync deactivates locally rather than removing rows, so the 17 seed products and their 26 variants are
@@ -388,7 +413,9 @@ product's status to its variants (the cascade fix), and `write_products` + `writ
 
 1. **Validate** with a strict zod schema (unknown keys rejected). The cart is **client-held** and
    carries `{ variantId, quantity }` only — there is no server-side Cart table, so there is nothing
-   stale to trust.
+   stale to trust. **The phone number is validated and normalised to E.164 here**, which is before
+   the order exists: a number Shopify refuses must never reach a committed order, because the
+   rejection then arrives in a background worker where nobody sees it (D12).
 2. **Idempotency check.** Look up `idempotencyKey`. If a row exists, return it **only when
    `requestFingerprint` matches**; otherwise respond `409`. See §4.3.
 3. **Re-price server-side.** Prices and currency are read from MySQL. Price fields from the client
@@ -871,6 +898,7 @@ row was correct and complete throughout, but job history is now complete too.
 | D9 | **`draftOrderComplete` is not idempotent by contract.** Safety comes from the lookup before it, which is a read-then-act with a window. | The window is small and the alternative — Shopify-side idempotency keys on this mutation — does not exist. The unique index on `shopifyOrderId` is the final backstop. |
 | D10 | **COD relies on a DEPRECATED argument.** `draftOrderComplete(paymentPending: true)` is the default because `paymentTerms` — the documented replacement — is refused: *"The user must have access to set payment terms."* Present and functional on 2026-07, but Shopify has named its successor, so a future API version will remove it. | **Migration is one setting:** grant the app permission to set payment terms, then `SHOPIFY_COD_PAYMENT_MODE=payment_terms`. Both paths are implemented and unit-tested; only the permission is missing. Re-check on every API-version bump. |
 | D11 | ~~`JobLog` can lose an attempt.~~ **RESOLVED.** A `jobInstance` column (BullMQ's `job.timestamp`) now discriminates one job instance from its replacement, and the uniqueness is `(bullJobId, jobInstance, attempt)` — so a replacement job's attempt 1 is recorded alongside the attempt 1 of the job it replaced, while re-logging a given attempt of a given instance stays idempotent. Migration `20260929172148_job_log_instance_discriminator`; the column defaults to `""` so pre-existing rows keep the old uniqueness among themselves. | Closed. Regression tests assert both attempt-1 rows persist with distinct instances, that attempts within one instance still number 1..n, and that the instance is recorded on a first attempt. |
+| D12 | ~~An unusable phone number is only caught by Shopify, after the order exists.~~ **RESOLVED.** The checkout required a *non-empty* phone on the reasoning that formats vary by country and the courier is the real validator. The courier is not the first validator: `draftOrderCreate` answers `phone: Phone is invalid`, and by then the local order is committed and the shopper has seen a confirmation page, so the order can only reach `FAILED` in a worker where nobody sees it. Two real orders were lost that way. `customerPhone` now validates structurally and normalises to E.164 in the request schema, before the idempotency lookup, the variant re-read, the transaction and the enqueue. | Closed. The rule is calibrated against live data — it accepts both numbers Shopify accepted and rejects both it refused. `src/lib/phone.ts` records why a numbering-plan database is deliberately *not* behind it: wrong guesses there would reject real customers, which is the failure this fix exists to avoid. The **visibility** half is still open — see D4. |
 
 ### 4.3 Idempotency
 
@@ -1033,9 +1061,12 @@ the code.
 - **Prisma is the only DB access layer.** No raw `mysql2`, no second query builder, no `$queryRaw`
   except as a reviewed, parameterized exception. One `PrismaClient` singleton per process.
 - **Next 16 specifics.** `params` / `searchParams` / `cookies()` / `headers()` are async and must be
-  awaited. `proxy.ts` guards `/admin`; because Server Functions are POST-able directly, every admin
-  action re-checks authorization inside its own body. `ioredis` / `bullmq` go into
-  `serverExternalPackages` if the web process imports them (`@prisma/client` is automatic).
+  awaited. `ioredis` / `bullmq` go into `serverExternalPackages` if the web process imports them
+  (`@prisma/client` is automatic). This paragraph previously described a `proxy.ts` guard over
+  `/admin` and in-function authorization for admin actions; **neither was built**, and there is no
+  `/admin` route — only the unauthenticated `POST /api/admin/sync` recorded as X8. If an admin
+  surface is added, the guard belongs in `proxy.ts` (Next 16's replacement for `middleware.ts`) *and*
+  inside each action, because a Server Function is POST-able directly.
 
 ---
 
@@ -1106,7 +1137,7 @@ stranded draft — inert, not an order, listed by reconcile for cleanup.
 | X5 | **COD fraud** — no payment step, no fraud gate | per-IP and per-phone rate limiting, velocity checks, admin review. **No OTP** by decision — accepted residual risk |
 | X6 | Cross-customer order disclosure via idempotency key | `requestFingerprint` binding (§4.3) |
 | X7 | PII in logs, payloads, traces | ID-only payloads; redaction; no raw webhook bodies |
-| X8 | Unauthenticated admin surface | `proxy.ts` guard **plus** in-function authorization |
+| X8 | Unauthenticated admin surface | **not mitigated** — `POST /api/admin/sync` has no authentication and no authorization check, and the `proxy.ts` guard this row used to claim was never written. Anyone who can reach the web process can trigger a catalog resync. It enqueues a sync and nothing else — it cannot read or write an order, and the worker's database lock makes a flood of triggers collapse into one run — so the exposure is a denial-of-service and Shopify-quota concern rather than a data one (§9.6) |
 | X9 | Order confirmation enumeration | `publicToken`, never `id` or `reference` |
 | X10 | Supply-chain drift | `package-lock.json` committed; npm only |
 

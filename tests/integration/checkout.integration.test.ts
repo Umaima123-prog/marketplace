@@ -27,6 +27,9 @@ import { disconnect, resetDatabase, testPrisma } from "./setup";
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const { getOrderByPublicToken, placeOrder } = await import("@/src/server/checkout/checkout.service");
+// Real BullMQ, for the one test that asserts the queue is untouched by a refused
+// checkout. Closed in afterAll so the suite leaves no Redis connection behind.
+const { enqueueSubmitOrder, getSubmitOrderQueue } = await import("@/src/lib/queues");
 
 const db = testPrisma;
 
@@ -119,7 +122,10 @@ function recordingEnqueuer() {
 
 beforeAll(resetDatabase);
 beforeEach(resetDatabase);
-afterAll(disconnect);
+afterAll(async () => {
+  await getSubmitOrderQueue().close();
+  await disconnect();
+});
 
 describe("placeOrder: the happy path", () => {
   it("creates one order with its items, priced from the database", async () => {
@@ -172,7 +178,10 @@ describe("placeOrder: the happy path", () => {
 
     const order = await db.order.findUnique({ where: { reference: result.order.reference } });
     expect(order?.customerName).toBe("Ayesha Khan");
-    expect(order?.customerPhone).toBe("+92 300 1234567");
+    // Stored in E.164, not as typed: the fixture sends "+92 300 1234567" and the
+    // schema normalises it, so what reaches Shopify is settled here rather than
+    // depending on a shopper's spacing.
+    expect(order?.customerPhone).toBe("+923001234567");
     expect(order?.city).toBe("Lahore");
     expect(order?.countryCode).toBe("PK");
     expect(order?.customerNote).toBe("Call on arrival");
@@ -628,6 +637,129 @@ describe("placeOrder: the transaction", () => {
     // unreachable. Neither may exist.
     expect(await db.order.count()).toBe(0);
     expect(await db.orderItem.count()).toBe(0);
+  });
+});
+
+/**
+ * Phone validation, which exists because of a verified production failure: a
+ * number Shopify refuses used to pass checkout, so the order committed, the
+ * shopper saw a confirmation page, and the submission went `FAILED` in a
+ * background worker where nobody saw it (VERIFICATION.md 5a).
+ *
+ * The claim under test is therefore not "the schema rejects it" -- that is a unit
+ * test -- but that **nothing is written and nothing is queued** when it does.
+ */
+describe("placeOrder: an unusable phone number is refused before anything is written", () => {
+  /** Shapes a real shopper produces, all refused by Shopify's own validation. */
+  const UNUSABLE = ["03001234567", "(042) 111-222-333", "0300-1234567", "+92", "none"];
+
+  it("rejects it as a validation failure, naming the phone field", async () => {
+    const product = await seedProduct({ variants: [{ price: "19.99" }] });
+
+    for (const phone of UNUSABLE) {
+      const result = await placeOrder(
+        checkoutBody([{ variantId: product.variants[0].id, quantity: 1 }], {
+          customerPhone: phone,
+        }),
+      );
+
+      expect(result.ok, phone).toBe(false);
+      if (result.ok) return;
+      expect(result.code, phone).toBe("validation_failed");
+      if (result.code !== "validation_failed") return;
+      // The key the form reads. A nested key would render nothing, which is the
+      // same silent failure in a different place.
+      expect(result.fieldErrors.customerPhone, phone).toContain("+923001234567");
+    }
+  });
+
+  it("creates no Order and no OrderItem", async () => {
+    const product = await seedProduct({ variants: [{ price: "19.99" }] });
+
+    for (const phone of UNUSABLE) {
+      await placeOrder(
+        checkoutBody([{ variantId: product.variants[0].id, quantity: 1 }], {
+          customerPhone: phone,
+        }),
+      );
+    }
+
+    // Counted on the second connection, so this is about committed rows.
+    expect(await db.order.count()).toBe(0);
+    expect(await db.orderItem.count()).toBe(0);
+  });
+
+  it("enqueues no submit-order job", async () => {
+    const product = await seedProduct({ variants: [{ price: "19.99" }] });
+    const enqueuer = recordingEnqueuer();
+
+    await placeOrder(
+      checkoutBody([{ variantId: product.variants[0].id, quantity: 1 }], {
+        customerPhone: "03001234567",
+      }),
+      { enqueueSubmit: enqueuer.enqueueSubmit },
+    );
+
+    expect(enqueuer.calls).toHaveLength(0);
+  });
+
+  it("adds nothing to the real BullMQ queue", async () => {
+    // The injected enqueuer above proves the service never called it. This proves
+    // the queue itself is untouched, against real Redis -- the two together rule
+    // out both "we called it" and "something else queued it".
+    const product = await seedProduct({ variants: [{ price: "19.99" }] });
+    const queue = getSubmitOrderQueue();
+    await queue.waitUntilReady();
+
+    const before = await queue.getJobCounts();
+
+    const result = await placeOrder(
+      checkoutBody([{ variantId: product.variants[0].id, quantity: 1 }], {
+        customerPhone: "03001234567",
+      }),
+      { enqueueSubmit: async (orderId) => { await enqueueSubmitOrder(orderId); } },
+    );
+    expect(result.ok).toBe(false);
+
+    expect(await queue.getJobCounts()).toEqual(before);
+    expect(await db.order.count()).toBe(0);
+  });
+
+  it("accepts a valid international number and stores it in E.164", async () => {
+    const product = await seedProduct({ variants: [{ price: "19.99" }] });
+
+    // Three spellings of one number, each placed as its own order.
+    for (const phone of ["+923001234567", "+92 300 1234567", "0092-300-1234567"]) {
+      const result = await placeOrder(
+        checkoutBody([{ variantId: product.variants[0].id, quantity: 1 }], {
+          customerPhone: phone,
+        }),
+      );
+
+      expect(result.ok, phone).toBe(true);
+      if (!result.ok) return;
+
+      const order = await db.order.findUnique({
+        where: { reference: result.order.reference },
+        select: { customerPhone: true, status: true },
+      });
+      expect(order?.customerPhone, phone).toBe("+923001234567");
+      expect(order?.status, phone).toBe("PENDING_SYNC");
+    }
+  });
+
+  it("still refuses an over-long value on the column width, before format", async () => {
+    // VARCHAR(32). The width check must not be lost behind the format check.
+    const product = await seedProduct({ variants: [{ price: "19.99" }] });
+
+    const result = await placeOrder(
+      checkoutBody([{ variantId: product.variants[0].id, quantity: 1 }], {
+        customerPhone: `+${"9".repeat(40)}`,
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(await db.order.count()).toBe(0);
   });
 });
 

@@ -21,14 +21,28 @@ export default async function CatalogPage({
   const { products, nextCursor } = await listProducts({ cursor });
 
   return (
-    <StorefrontLayout
-      title="Catalog"
-      subtitle={
-        products.length > 0
-          ? `${products.length} product${products.length === 1 ? "" : "s"}`
-          : undefined
-      }
-    >
+    // No page title: the hero below names the store, and a "Catalog" heading
+    // above it would be a second title saying less.
+    <StorefrontLayout>
+      {/*
+        A plain typographic hero. No stock photography and no claim that is not
+        true of this store: the three points below are each a property of the
+        system as built -- cash on delivery, a Shopify-synced catalog, and stock
+        re-checked server-side when the order is placed.
+      */}
+      <section className="storefront-hero">
+        <h1 className="storefront-hero-title">Electronics, delivered and paid in cash</h1>
+        <p className="storefront-hero-lead">
+          Headphones, keyboards, wearables and desk accessories. Pay the courier when your order
+          arrives — no card details are collected at any point.
+        </p>
+        <ul className="storefront-hero-points">
+          <li>Cash on delivery</li>
+          <li>Live Shopify catalog</li>
+          <li>Stock confirmed at checkout</li>
+        </ul>
+      </section>
+
       {products.length === 0 ? (
         // An empty catalog is a legitimate state -- a store with nothing
         // published, or a sync that has not run yet -- and says so plainly
@@ -43,6 +57,13 @@ export default async function CatalogPage({
         </div>
       ) : (
         <>
+          <div className="storefront-section-head">
+            <h2 className="storefront-section-title">Featured Electronics</h2>
+            <span className="storefront-section-count">
+              {products.length} product{products.length === 1 ? "" : "s"}
+            </span>
+          </div>
+
           <div className="row">
             {products.map((product) => (
               <div className="col-12 col-sm-6 col-lg-4 col-xl-3 mb-4 d-flex" key={product.handle}>

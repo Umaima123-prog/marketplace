@@ -18,7 +18,7 @@ storefront's source of truth and a separate worker process owning every Shopify 
 | Background product sync (Shopify → MySQL) | Implemented, verified against a real store |
 | Storefront listing and product detail | Implemented, verified |
 | Guest cart + COD checkout | Implemented, verified |
-| Asynchronous COD order submission (MySQL → Shopify) | Implemented, **one real order taken end to end** |
+| Asynchronous COD order submission (MySQL → Shopify) | Implemented, **two real orders taken end to end**; the permanent-failure path exercised by two more |
 | Webhooks | Not built — deliberate scope decision |
 | Admin UI | Not built |
 | Inventory reservation | Not built — deliberate, documented (C1) |
@@ -27,12 +27,14 @@ storefront's source of truth and a separate worker process owning every Shopify 
 
 | Check | Result |
 |---|---|
-| `npm test` | **284 passed** (19 files) |
-| `npm run test:integration` | **190 passed** (7 files, real MySQL + real Redis) |
+| `npm test` | **302 passed** (20 files) |
+| `npm run test:integration` | **197 passed** (7 files, real MySQL + real Redis) |
 | `npm run typecheck` | clean |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean |
 | Real end-to-end Shopify COD orders | **2 verified** — one from the controlled Phase 5 test, one from a manual storefront checkout. Each is `SYNCED` locally with one draft and one Shopify order, `displayFinancialStatus: PENDING` with the full amount outstanding, totals matching to the cent, no duplicates |
+| Permanent-failure path | **2 local orders `FAILED`**, both refused by Shopify at draft creation (`phone: Phone is invalid`), correctly classified non-retryable with no draft and no Shopify order created. Their cause is now validated out at the checkout boundary — see [VERIFICATION.md](VERIFICATION.md) §5a |
+| Storefront UX | **58 checks** in a real headless browser: variant switching, sold-out states, quantity caps, cart, checkout and three viewport widths (VERIFICATION.md §5b) |
 | Demo video | <https://www.loom.com/share/02fc3b42859640d9b1428029c730b425> |
 
 Details, including what was *not* verified live, are in [VERIFICATION.md](VERIFICATION.md).
@@ -113,14 +115,14 @@ Short list; the reasoning is in `ARCHITECTURE.md`.
 
 ## Known gaps
 
-Full list with reasoning in `ARCHITECTURE.md` (§3.7 S1–S8, §3a.1 F1–F6, §4.1c C1–C8, §4.2c D3–D11).
+Full list with reasoning in `ARCHITECTURE.md` (§3.7 S1–S8, §3a.1 F1–F6, §4.1c C1–C8, §4.2c D3–D12).
 The ones a reviewer should weigh:
 
 | Gap | Summary |
 |---|---|
 | **C1** | **No inventory reservation.** Stock is validated server-side at checkout but not reserved, so two simultaneous checkouts for the last unit can both succeed. The largest known correctness gap, and deliberate: a half-built reservation counter that silently drifts is worse than a documented race. A real implementation is a subsystem with its own lifecycle and reconciliation. |
 | **D10** | **COD uses a deprecated argument.** `draftOrderComplete(paymentPending: true)`, because `paymentTerms` — the documented replacement — is refused for this app. Both paths are implemented; migrating is one setting once the permission is granted. |
-| **D4, D5** | No admin UI for `FAILED` orders, and no sweep for drafts stranded by a permanent failure. |
+| **D4, D5** | No admin UI for `FAILED` orders, and no sweep for drafts stranded by a permanent failure. Two such orders exist and are invisible to everyone: the shopper saw a confirmation page, and nothing surfaces that Shopify refused the order. The *cause* of those two is fixed — phone format is now validated and normalised to E.164 before the order is created — but the visibility gap is not. |
 | **S2** | Shopify cost pacing is process-local, so a second worker process would over-request. |
 | **S8, F5** | The >100-variant chain and production-size keyset pagination have never run against live data — the development store is too small. Automated tests only. |
 | **F6** | Publication state is not synced: a product `ACTIVE` in Shopify but unpublished from the Online Store channel is still listed. Documented as a scope decision rather than patched with a storefront filter that would disagree with the data it reads. |
@@ -144,8 +146,8 @@ decision was made.
 | Secrets never logged | ✅ the access token exists as a local variable and one request header. `REDACT_PATHS` in `src/lib/logger.ts` is the backstop, covering tokens, secrets, passwords and every customer field including city and postal code |
 | Order URLs not enumerable | ✅ the confirmation page is addressed by a 32-byte random token, never by the short customer-facing reference |
 
-The one real order created during verification lives on a **development store** and used synthetic
-data explicitly marked as a test.
+Every order discussed here lives on a **development store**. The controlled Phase 5 order used
+synthetic data explicitly marked as a test.
 
 ## AI and tooling disclosure
 

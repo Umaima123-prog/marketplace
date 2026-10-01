@@ -58,6 +58,12 @@ export interface ProductCardView {
   /** True when at least one variant is purchasable. */
   available: boolean;
   variantCount: number;
+  /**
+   * True when the purchasable variants do not all cost the same, which is the
+   * only case where "from $X" means anything. Two variants at one price are not
+   * a range, and labelling them as one reads as a hidden cheaper option.
+   */
+  priceVaries: boolean;
 }
 
 export interface ProductDetailView {
@@ -277,9 +283,11 @@ type ListingRow = Prisma.ProductGetPayload<{ select: typeof LISTING_SELECT }> & 
 export function toCard(row: ListingRow): ProductCardView | null {
   if (row.variants.length === 0) return null;
 
-  // Variants arrive ordered by price ascending, so the first is the lowest.
+  // Variants arrive ordered by price ascending, so the first is the lowest and
+  // the last is the highest.
   // Decimal -> string at the boundary; no price becomes a number anywhere.
   const cheapest = row.variants[0];
+  const dearest = row.variants[row.variants.length - 1];
   // normalizeMoney, not toString alone: Prisma's Decimal drops trailing zeros,
   // which would put "15" and "9.99" in the same response.
   const fromPrice = normalizeMoney(cheapest.price.toString());
@@ -297,6 +305,7 @@ export function toCard(row: ListingRow): ProductCardView | null {
     currencyCode: cheapest.currencyCode,
     available: row.variants.some(isPurchasable),
     variantCount: row.variants.length,
+    priceVaries: compareMoney(normalizeMoney(dearest.price.toString()), fromPrice) > 0,
   };
 }
 

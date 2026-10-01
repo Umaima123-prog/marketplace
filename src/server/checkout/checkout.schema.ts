@@ -13,6 +13,7 @@
 import { z } from "zod";
 
 import { MAX_CART_LINES, MAX_LINE_QUANTITY } from "@/src/lib/cart/cart-state";
+import { normalizePhone } from "@/src/lib/phone";
 
 /** Trim, then reject empty -- a string of spaces is not a name. */
 const requiredText = (max: number, label: string) =>
@@ -59,10 +60,33 @@ export const checkoutSchema = z
       ),
 
     customerName: requiredText(255, "Name"),
-    // Deliberately permissive: phone formats vary by country and an over-strict
-    // pattern rejects real customers. Length-bounded to fit VARCHAR(32); the
-    // courier is the real validator.
-    customerPhone: requiredText(32, "Phone number"),
+    /**
+     * Structurally validated and normalised to E.164 before anything is written.
+     *
+     * This field used to be `requiredText(32, "Phone number")` on the reasoning
+     * that "the courier is the real validator". It is not: Shopify validates
+     * first, and `draftOrderCreate` refusing a number with
+     * `phone: Phone is invalid` happens *after* the local order is committed and
+     * the shopper has seen a confirmation page. The order then goes `FAILED` in
+     * a background worker where nobody sees it. Two real orders were lost that
+     * way, which is what moved this check in front of the write.
+     *
+     * The normalised value is what gets stored and what is later sent to
+     * Shopify, so the format is settled once, here, rather than depending on how
+     * a shopper happened to space their digits. See `src/lib/phone.ts` for where
+     * the line is drawn and why a numbering-plan database is not behind it.
+     */
+    customerPhone: requiredText(32, "Phone number").transform((value, ctx) => {
+      const result = normalizePhone(value);
+      if (result.ok) return result.e164;
+      // No `path`: zod already scopes an issue raised inside a field's transform
+      // to that field. Adding one appends to it, producing
+      // `customerPhone.customerPhone` -- a key the form never reads, so the
+      // message would render nowhere. Which is the same class of bug as the one
+      // this validation exists to fix.
+      ctx.addIssue({ code: "custom", message: result.message });
+      return z.NEVER;
+    }),
     // Optional: a cash-on-delivery order needs a phone, not an email.
     customerEmail: z
       .union([z.string().trim().max(320).email("Enter a valid email address"), z.literal("")])

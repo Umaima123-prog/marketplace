@@ -9,7 +9,7 @@ import { formatMoney } from "@/src/lib/money";
 import type { ProductDetailView, VariantView } from "@/src/server/catalog/catalog.service";
 
 /**
- * Variant selection, gallery and the Add to cart control.
+ * Variant selection, gallery and the Add to Cart control.
  *
  * The ONLY client component on the storefront, and the only reason it is one:
  * selecting a variant changes what the page shows.
@@ -30,8 +30,16 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
 
   const [selectedId, setSelectedId] = useState<string | undefined>(initial?.id);
   const [imageIndex, setImageIndex] = useState(0);
-  const [quantity, setQuantity] = useState(1);
-  const [added, setAdded] = useState(false);
+  const [requestedQuantity, setRequestedQuantity] = useState(1);
+  /**
+   * Which variant was last added, not a boolean.
+   *
+   * The confirmation then disappears by itself when the shopper switches
+   * option, because the message is a function of the current selection rather
+   * than a flag someone has to remember to reset. Nothing is cleared in an
+   * effect, which also keeps React 19's `set-state-in-effect` rule satisfied.
+   */
+  const [addedVariantId, setAddedVariantId] = useState<string | null>(null);
 
   const { add } = useCart();
 
@@ -40,19 +48,44 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
 
   const image = product.images[imageIndex] ?? product.images[0] ?? null;
 
+  /**
+   * The ceiling on this line's quantity.
+   *
+   * `inventoryQuantity` is null when Shopify does not track the variant, and a
+   * tracked variant sitting at 0 while still `available` is one Shopify allows
+   * to oversell (`inventoryPolicy = CONTINUE`). Neither is limited by stock, so
+   * only a positive tracked count narrows the cap below the per-line maximum.
+   */
+  const stockCap = selected?.inventoryQuantity ?? null;
+  const stockLimited = stockCap !== null && stockCap > 0;
+  const maxQuantity = stockLimited
+    ? Math.min(MAX_LINE_QUANTITY, stockCap)
+    : MAX_LINE_QUANTITY;
+
+  /**
+   * Clamped at render rather than corrected in an effect. Switching from a
+   * variant with 25 in stock to one with 3 cannot leave 25 in the field for a
+   * frame, and the number that reaches the cart is the clamped one because it is
+   * the only one this component ever reads.
+   */
+  const quantity = Math.min(Math.max(requestedQuantity, 1), maxQuantity);
+  const justAdded = addedVariantId !== null && addedVariantId === selected?.id;
+
   return (
     <div className="row">
-      <div className="col-md-6 mb-3">
+      <div className="col-lg-6 mb-4 mb-lg-0">
         {image ? (
           <>
-            {/* eslint-disable-next-line @next/next/no-img-element -- remote Shopify CDN, see ProductCard */}
-            <img
-              src={image.url}
-              alt={image.altText ?? product.title}
-              className="storefront-gallery-main border rounded"
-            />
+            <div className="storefront-detail-media">
+              {/* eslint-disable-next-line @next/next/no-img-element -- remote Shopify CDN, see ProductCard */}
+              <img
+                src={image.url}
+                alt={image.altText ?? product.title}
+                className="storefront-gallery-main"
+              />
+            </div>
             {product.images.length > 1 ? (
-              <div className="d-flex flex-wrap mt-2" role="group" aria-label="Product images">
+              <div className="d-flex flex-wrap mt-3" role="group" aria-label="Product images">
                 {product.images.map((thumb, index) => (
                   <button
                     key={thumb.url}
@@ -76,31 +109,34 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
             ) : null}
           </>
         ) : (
-          <div className="storefront-gallery-main storefront-card-image--placeholder border rounded d-flex align-items-center justify-content-center">
+          <div className="storefront-detail-media storefront-gallery-main storefront-card-image--placeholder d-flex align-items-center justify-content-center">
             <span className="text-muted">No image available</span>
           </div>
         )}
       </div>
 
-      <div className="col-md-6">
+      <div className="col-lg-6">
+        {product.vendor ? <p className="storefront-card-vendor">{product.vendor}</p> : null}
+        <h1 className="storefront-detail-title">{product.title}</h1>
+
         {selected ? (
           <>
-            <p className="mb-1">
-              <span className="h3 font-weight-bold">
+            <div className="d-flex align-items-baseline flex-wrap mt-3">
+              <span className="storefront-detail-price mr-2">
                 {formatMoney(selected.price, selected.currencyCode)}
               </span>
               {selected.compareAtPrice ? (
-                <span className="ml-2 storefront-price-compare">
+                <span className="storefront-price-compare">
                   {formatMoney(selected.compareAtPrice, selected.currencyCode)}
                 </span>
               ) : null}
-            </p>
+            </div>
 
-            <p className="mb-3">
+            <p className="mt-2 mb-3">
               {selected.available ? (
                 <span className="badge badge-success">In stock</span>
               ) : (
-                <span className="badge badge-secondary">Out of stock</span>
+                <span className="badge badge-danger">Sold Out</span>
               )}
               {/*
                 Quantity is shown only when Shopify tracks it. For an untracked
@@ -108,51 +144,67 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
                 would be actively wrong.
               */}
               {selected.available && selected.inventoryQuantity !== null ? (
-                <span className="text-muted small ml-2">{selected.inventoryQuantity} available</span>
+                <span className="text-muted small ml-2">
+                  {selected.inventoryQuantity} available
+                </span>
+              ) : null}
+              {selected.sku ? (
+                <span className="storefront-detail-sku ml-2">SKU {selected.sku}</span>
               ) : null}
             </p>
 
             {product.variants.length > 1 ? (
               <div className="form-group">
-                <label className="font-weight-bold" htmlFor="variant-select">
+                <label className="storefront-option-label" htmlFor="variant-select">
                   Option
                 </label>
                 <select
                   id="variant-select"
-                  className="form-control"
+                  className="form-control storefront-select"
                   value={selected.id}
                   onChange={(event) => setSelectedId(event.target.value)}
                 >
                   {product.variants.map((variant) => (
                     <option key={variant.id} value={variant.id}>
                       {variant.title}
-                      {variant.available ? "" : " — out of stock"}
+                      {" — "}
+                      {formatMoney(variant.price, variant.currencyCode)}
+                      {variant.available ? "" : " · Sold Out"}
                     </option>
                   ))}
                 </select>
               </div>
             ) : null}
 
-            {selected.sku ? <p className="text-muted small">SKU: {selected.sku}</p> : null}
-
             <div className="form-group">
-              <label className="font-weight-bold" htmlFor="quantity-input">
+              <label className="storefront-option-label" htmlFor="quantity-input">
                 Quantity
               </label>
               <input
                 id="quantity-input"
                 type="number"
-                className="form-control"
+                className="form-control storefront-quantity"
                 min={1}
-                max={MAX_LINE_QUANTITY}
+                max={maxQuantity}
                 step={1}
                 value={quantity}
+                disabled={!selected.available}
                 onChange={(event) => {
                   const next = Number.parseInt(event.target.value, 10);
                   if (Number.isNaN(next)) return;
-                  setQuantity(Math.min(Math.max(next, 1), MAX_LINE_QUANTITY));
+                  setRequestedQuantity(next);
                 }}
               />
+              {/*
+                `max` on the input stops the spinner and a typed-in number past
+                the cap, but the clamp above is what actually decides -- an
+                attribute is a convenience, never the rule.
+              */}
+              {stockLimited && maxQuantity < MAX_LINE_QUANTITY ? (
+                <small className="form-text text-muted">
+                  {maxQuantity} in stock for this option.
+                </small>
+              ) : null}
             </div>
 
             {/*
@@ -167,28 +219,30 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
             */}
             <button
               type="button"
-              className="btn btn-primary btn-lg btn-block"
+              className="btn btn-primary btn-block storefront-cta"
               disabled={!selected.available}
               onClick={() => {
                 add(selected.id, quantity);
-                setAdded(true);
+                setAddedVariantId(selected.id);
               }}
             >
-              Add to cart
+              {selected.available ? "Add to Cart" : "Sold Out"}
             </button>
 
-            {added ? (
+            {justAdded ? (
               <p className="text-success small mt-2 mb-0">
                 Added to your cart. <Link href="/cart">View cart</Link>
               </p>
             ) : (
               <p className="text-muted small mt-2 mb-0">
-                Pay in cash when your order is delivered.
+                {selected.available
+                  ? "Pay in cash when your order is delivered."
+                  : "This option is sold out. Choose another option, or check back later."}
               </p>
             )}
           </>
         ) : (
-          <div className="alert alert-secondary mb-0">
+          <div className="alert alert-secondary mb-0 mt-3">
             This product has no purchasable options at the moment.
           </div>
         )}

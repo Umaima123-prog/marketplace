@@ -41,11 +41,12 @@ export function CartView() {
 
   if (cart.lines.length === 0) {
     return (
-      <div className="card">
-        <div className="card-body text-center">
-          <p className="mb-3">Your cart is empty.</p>
+      <div className="card storefront-card">
+        <div className="card-body text-center py-5">
+          <h2 className="h5">Your cart is empty</h2>
+          <p className="text-muted">Nothing has been added yet.</p>
           <Link className="btn btn-primary" href="/">
-            Browse the catalog
+            Continue Shopping
           </Link>
         </div>
       </div>
@@ -56,43 +57,49 @@ export function CartView() {
 
   return (
     <div className="row">
-      <div className="col-lg-8">
-        <div className="card">
-          <div className="card-body p-0">
-            <table className="table table-hover mb-0">
-              <thead>
+      <div className="col-lg-8 mb-4 mb-lg-0">
+        <div className="card storefront-card">
+          <div className="card-body p-0 table-responsive">
+            <table className="table table-hover mb-0 align-middle">
+              <thead className="text-muted small text-uppercase">
                 <tr>
-                  <th colSpan={2}>Item</th>
-                  <th className="text-right">Price</th>
-                  <th style={{ width: "8rem" }}>Quantity</th>
-                  <th className="text-right">Total</th>
-                  <th />
+                  <th className="border-top-0" colSpan={2}>
+                    Item
+                  </th>
+                  <th className="border-top-0 text-right">Price</th>
+                  <th className="border-top-0" style={{ width: "8rem" }}>
+                    Quantity
+                  </th>
+                  <th className="border-top-0 text-right">Total</th>
+                  <th className="border-top-0" />
                 </tr>
               </thead>
               <tbody>
                 {hydrated.lines.map((line) => (
                   <tr key={line.variantId} className={line.problem ? "table-warning" : undefined}>
-                    <td style={{ width: "4.5rem" }}>
+                    <td className="align-middle" style={{ width: "5rem" }}>
                       {line.imageUrl ? (
                         /* eslint-disable-next-line @next/next/no-img-element -- remote Shopify CDN, see ProductCard */
-                        <img
-                          src={line.imageUrl}
-                          alt=""
-                          className="rounded"
-                          style={{ width: "3.5rem", height: "3.5rem", objectFit: "cover" }}
-                        />
+                        <img src={line.imageUrl} alt="" className="storefront-line-thumb" />
                       ) : null}
                     </td>
-                    <td>
+                    <td className="align-middle">
                       {line.productHandle ? (
-                        <Link href={`/products/${line.productHandle}`}>{line.productTitle}</Link>
+                        <Link
+                          className="font-weight-bold"
+                          href={`/products/${line.productHandle}`}
+                        >
+                          {line.productTitle}
+                        </Link>
                       ) : (
-                        <span>{line.productTitle}</span>
+                        <span className="font-weight-bold">{line.productTitle}</span>
                       )}
                       {line.variantTitle ? (
                         <div className="text-muted small">{line.variantTitle}</div>
                       ) : null}
-                      {line.sku ? <div className="text-muted small">SKU: {line.sku}</div> : null}
+                      {line.sku ? (
+                        <div className="storefront-detail-sku">SKU {line.sku}</div>
+                      ) : null}
                       {line.problem ? (
                         <div className="text-danger small font-weight-bold">
                           {describeProblem(line.problem)}
@@ -142,35 +149,36 @@ export function CartView() {
       </div>
 
       <div className="col-lg-4">
-        <div className="card">
+        <div className="card storefront-card storefront-sticky">
           <div className="card-header">
-            <h3 className="card-title">Summary</h3>
+            <h3 className="card-title">Order summary</h3>
           </div>
           <div className="card-body">
             <dl className="row mb-0">
-              <dt className="col-7">Items</dt>
+              <dt className="col-7 font-weight-normal">Items</dt>
               <dd className="col-5 text-right">{hydrated.itemCount}</dd>
 
-              <dt className="col-7">Subtotal</dt>
+              <dt className="col-7 font-weight-normal">Subtotal</dt>
               <dd className="col-5 text-right">
                 {formatMoney(hydrated.subtotal, hydrated.currencyCode)}
               </dd>
 
               {/* Both fixed at zero for this exercise, and shown rather than
                   hidden so the grand total is not a number with no derivation. */}
-              <dt className="col-7 text-muted">Shipping</dt>
+              <dt className="col-7 text-muted font-weight-normal">Shipping</dt>
               <dd className="col-5 text-right text-muted">Free</dd>
 
-              <dt className="col-7 text-muted">Tax</dt>
+              <dt className="col-7 text-muted font-weight-normal">Tax</dt>
               <dd className="col-5 text-right text-muted">
                 {formatMoney("0.00", hydrated.currencyCode)}
               </dd>
 
-              <dt className="col-7 font-weight-bold border-top pt-2">Total</dt>
-              <dd className="col-5 text-right font-weight-bold border-top pt-2">
+              <dt className="col-7 storefront-summary-total border-top pt-3 mt-2">Total</dt>
+              <dd className="col-5 text-right storefront-summary-total border-top pt-3 mt-2">
                 {formatMoney(hydrated.subtotal, hydrated.currencyCode)}
               </dd>
             </dl>
+            <p className="storefront-cod-chip mt-3 mb-0">Cash on delivery</p>
           </div>
           <div className="card-footer">
             {blocked.length > 0 ? (
@@ -181,20 +189,27 @@ export function CartView() {
                 </p>
                 {/* A disabled link is not a thing in HTML, so this is a disabled
                     button that looks like the real one. */}
-                <button type="button" className="btn btn-primary btn-block" disabled>
-                  Continue to checkout
+                <button type="button" className="btn btn-primary btn-block storefront-cta" disabled>
+                  Checkout
                 </button>
               </>
             ) : (
               <Link
-                className={`btn btn-primary btn-block${hydrated.checkoutable ? "" : " disabled"}`}
+                className={`btn btn-primary btn-block storefront-cta d-flex align-items-center justify-content-center${
+                  hydrated.checkoutable ? "" : " disabled"
+                }`}
                 href="/checkout"
                 aria-disabled={!hydrated.checkoutable}
               >
-                Continue to checkout
+                Checkout
               </Link>
             )}
-            <p className="text-muted small mb-0 mt-2">
+
+            <Link className="btn btn-outline-secondary btn-block mt-2" href="/">
+              Continue Shopping
+            </Link>
+
+            <p className="text-muted small mb-0 mt-3">
               Payment is cash on delivery. Prices are confirmed again when you place the order.
             </p>
           </div>

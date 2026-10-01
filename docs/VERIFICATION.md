@@ -14,8 +14,8 @@ this document comes from running the command or query shown, not from the video.
 
 | Command | Result |
 |---|---|
-| `npm test` | **284 passed**, 19 files |
-| `npm run test:integration` | **190 passed**, 7 files (real MySQL + real Redis) |
+| `npm test` | **302 passed**, 20 files |
+| `npm run test:integration` | **197 passed**, 7 files (real MySQL + real Redis) |
 | `npm run typecheck` | clean (`tsc --noEmit`, no output) |
 | `npm run lint` | clean — 0 errors, 0 warnings |
 | `npm run build` | clean — 9 routes compiled |
@@ -29,7 +29,7 @@ database first, and the harness **refuses to start** unless `TEST_DATABASE_URL` 
 ending in `_test` — those tests `TRUNCATE` every table, and a bypass flag is a flag someone will
 set.
 
-## 2. Unit suite (284 tests, 19 files)
+## 2. Unit suite (302 tests, 20 files)
 
 Pure logic, fixtures and fake clients.
 
@@ -42,7 +42,7 @@ Pure logic, fixtures and fake clients.
 | Environment | `env.test.ts` |
 | Logging | `logger-redaction.test.ts` — exercised against a real pino instance rather than asserted as configuration |
 | Cart | `cart-state.test.ts`, `cart-line-eval.test.ts` |
-| Checkout | `checkout-schema.test.ts`, `checkout-fingerprint.test.ts` |
+| Checkout | `checkout-schema.test.ts`, `checkout-fingerprint.test.ts`, `phone.test.ts` |
 | Order submission | `draft-order-input.test.ts`, `submit-order-classification.test.ts`, `submit-order-port-resolution.test.ts`, `payment-terms.test.ts`, `cod-payment-mode.test.ts` |
 
 Behaviours worth calling out, because they encode rules rather than mechanics:
@@ -58,8 +58,11 @@ Behaviours worth calling out, because they encode rules rather than mechanics:
   `originalUnitPrice*` are documented as ignored when a `variantId` is present
 - the submission tag stays inside Shopify's 40-character limit for a real key **and** for any key
   the `VARCHAR(64)` column can hold
+- phone validation **agrees with Shopify** on all four number shapes this store has actually seen:
+  it accepts the two Shopify accepted and rejects the two it refused, so the rule is calibrated
+  against observed behaviour rather than taste
 
-## 3. Integration suite (190 tests, 7 files)
+## 3. Integration suite (197 tests, 7 files)
 
 Real MySQL for everything, and real Redis for the queue tests. Shopify is faked; the database is
 not — every claim in these tests is about what MySQL does under concurrent conditional updates,
@@ -98,6 +101,13 @@ Specific proofs rather than general coverage:
 One controlled cash-on-delivery order was taken on a Shopify **development store**. Identifiers are
 truncated here; no customer data is reproduced, and the data used was synthetic and marked as a
 test.
+
+**This section is a point-in-time record of that one run, against the Shopify demo seed catalog.**
+The counts below — "0 local orders" before, "exactly one local order" after — were true at the time
+and are deliberately left as they were recorded. They are **not** the current state: further
+orders have been placed through the storefront since, and the live position is in
+[§5a](#orders). The bugs in §4's subsections are likewise recorded as they happened rather than
+tidied away.
 
 **Before**: 0 local orders, 0 Shopify orders, 0 drafts tagged `COD`.
 
@@ -186,38 +196,117 @@ hardcoded in the storefront and no sync code changed for them.
 | Claim | Evidence |
 |---|---|
 | 10 electronics products storefront-visible | `isActive = true AND status = ACTIVE` count is 10; the listing renders 10 cards |
-| 14 variants active | 14 active, none carrying a `deactivationReason`; four products keep two variants (keyboard, smartwatch, USB-C hub, power bank) and six keep one |
-| Prices, SKUs, inventory | verified row by row per product; inventory total **356** across the 14 active variants |
-| 5 variants removed in Shopify | deleted with `productVariantsBulkDelete` (`PWH-WHT`, `GGM-WHT`, `EBS-BLU`, `ELS-GRY`, `SCW-WHT`); each survives locally as an **inactive** row with `deactivationReason = MISSING_FROM_SYNC`, so nothing was hard-deleted |
-| Removed variants are no longer sellable | absent from the listing and from every detail page; a cart request for one is refused with `variant_inactive` and `checkoutable: false`. Before the reconcile fix it would have been accepted |
+| 19 variants active | 19 active; nine products carry two variants and the webcam one |
+| Prices, SKUs, inventory | compared row by row against live Shopify in a single three-way check (spec / Shopify / MySQL): every option name, price, SKU, inventory quantity, `inventoryPolicy` and `tracked` flag agrees. Inventory total **319** across the 19 active variants |
+| 2 products are entirely sold out | ClearView webcam and SnapCharge charger: every active variant at zero. Both still listed, badged *Sold Out*, with Add to Cart disabled |
+| Images preserved through the variant work | 10 Shopify media and 10 `ProductImage` rows, unchanged; the convergence script asserts the media count per product before and after |
+| 5 variants were removed in an earlier tidy-up | deleted then with `productVariantsBulkDelete` (`PWH-WHT`, `GGM-WHT`, `EBS-BLU`, `ELS-GRY`, `SCW-WHT`); each still survives locally as an **inactive** row with `deactivationReason = MISSING_FROM_SYNC`, so nothing was ever hard-deleted |
+| Those five option names are back as new variants | re-created in Shopify for the final spec, so each has a **new** Shopify id and a new active local row. The inactive row keeps the historical `OrderItem` link; the active row is what the storefront sells |
 | All 10 have a working image | 10 `ProductImage` rows, one per product, `position 1`, `https://cdn.shopify.com/…`; one URL fetched directly → HTTP 200, `image/png`, 1,349,958 bytes |
 | Listing renders images | 10 CDN `<img>` sources, **0** "No image" placeholders (10 before the upload) |
 | A detail page renders its image | `/products/axis-smartwatch` 200, one gallery image, no placeholder, no thumbnail strip (single image) |
-| Variant switching | both variants' titles, prices and SKUs present in the delivered payload, so switching needs no request; a single-variant product shows no selector |
-| Cart hydration | two lines of a retained multi-variant product priced from MySQL, subtotal `139.97 USD`, `checkoutable: true` |
+| Variant switching | every variant's title, price, SKU and availability arrives with the page, so switching needs no request; a single-variant product shows no selector. Exercised in a real browser — see §5b |
+| Cart hydration | Axis Smartwatch *46mm* ×2 hydrated from MySQL at `149.99` a unit, line total and subtotal `299.98 USD`, `checkoutable: true` |
 | Old seed products archived | 15 ACTIVE seed products archived in Shopify by handle; already-ARCHIVED and DRAFT ones untouched; **nothing deleted** |
 | Old seed variants inactive | 26 / 26 inactive, all `deactivationReason = SHOPIFY_STATUS`; 0 variants active under an inactive product |
 | Archived products absent from the storefront | 0 occurrences of `Snowboard`, `Gift Card` or `Ski Wax` on the listing; three archived detail pages 404 |
 | Storefront still reads only MySQL | the web process log contains 0 Shopify references across every page load and API call; no storefront, cart, checkout or route module imports the Shopify client |
 | Both orders remain valid | each `SYNCED` with its Shopify ids and price snapshots intact. Neither archiving a product nor **deleting a variant** changed anything about them: the order whose variant was deleted still resolves to that variant row and still carries its price snapshot |
 
+## 5b. Storefront UX verification (real browser, 58 checks)
+
+The storefront has no DOM test harness (gap C6/F4), so the variant behaviour was verified the way a
+shopper exercises it: a headless Chrome driven over the DevTools Protocol against the dev server,
+clicking the real controls and reading the resulting DOM. No assertion below is inferred from source.
+
+Two things that first run got wrong are worth recording, because both would have produced a false
+pass or a false failure:
+
+- Assigning `input.value` from script goes through React's own value tracker, which then suppresses
+  the synthetic change event — the component never saw the edit. Driving the prototype's native
+  setter is what makes the event real, which is what a keystroke does.
+- The sticky summary is scoped to `min-width: 992px`, and the default headless window is 800px wide,
+  so the first run read `position: relative` and reported a failure that was the harness's.
+
+| Area | Verified |
+|---|---|
+| Pulse Wireless Headphones | defaults to the in-stock *Black* at `$79.99` / `PWH-BLK`, Add to Cart enabled. Selecting *White* changes the price to `$84.99`, the SKU to `PWH-WHT`, the badge to *Sold Out*, and disables both Add to Cart and the quantity field. Selecting *Black* again re-enables Add to Cart and restores `$79.99` |
+| Nova Mechanical Keyboard | *Red Switch* `$89.99` / `NMK-RED` and *Blue Switch* `$94.99` / `NMK-BLU`; switching moves price and SKU together, both in stock, button enabled |
+| SnapCharge Wireless Charger | card badged *Sold Out*; detail badged *Sold Out*; Add to Cart disabled and labelled *Sold Out*; still disabled after switching to the other sold-out option |
+| ClearView Full HD Webcam | `$54.99`, *Sold Out*, Add to Cart disabled, and no option selector at all for a single-variant product |
+| Catalog grid | 10 cards under *Featured Electronics*; every image tile measured square in the layout; *From* shown only where the active variants differ in price; exactly the two sold-out products carry the *Sold Out* badge |
+| Quantity cap | Axis Smartwatch *46mm* has 15 in stock: typing 99 is clamped to 15. Switching to *42mm* raises the cap to its own 20; switching back clamps to 15 again |
+| Cart | the line shows the chosen variant (*46mm*), its SKU, the server's unit price, the quantity, the line total and a subtotal of `$299.98`, with a thumbnail, a per-row Remove, and both *Checkout* and *Continue Shopping* |
+| Checkout | two-column layout, cash on delivery stated in both the header chip and the payment card, order summary computed `position: sticky` at desktop width, total due on delivery `$299.98`, all ten delivery fields present |
+| Responsive | no page scrolls sideways at 390 px, 768 px or 1366 px, across catalog, detail, cart and checkout |
+
+The browser added items to a cart and loaded the checkout page; it never submitted the form, so **no
+order was created** — the order count is unchanged (below).
+
 ### Orders
 
-**Two real orders exist, and both reached Shopify successfully.** 2 local orders, 2 Shopify
-orders, one-to-one; both `SYNCED` locally and both `PENDING` / unpaid in Shopify, which is correct
-for cash on delivery.
+**Two orders reached Shopify successfully; two were refused by Shopify before anything was created
+there; and manual storefront testing can add further orders that sit in `PENDING_SYNC` until the
+worker runs.** Shopify holds exactly **2** orders, each matching one local `SYNCED` order
+one-to-one, both `PENDING` / unpaid, which is correct for cash on delivery — plus 12 unused drafts
+from the §4 debugging.
 
-| | Origin | Evidence of origin | Catalog it exercised |
-|---|---|---|---|
-| Order 1 | **Phase 5 verification** — the controlled test described in §4 | idempotency key matches this project's verification-script pattern; customer details are the synthetic fixture; 6 attempts, which is the record of the bugs that run exposed | the old Shopify seed catalog |
-| Order 2 | **Manual UI checkout** through the storefront | browser-minted UUID key from `CheckoutForm`; customer details are **not** the fixture; 1 attempt | the **electronics** catalog |
+The `SYNCED` and `FAILED` counts below are stable facts. The local *total* is not: it rises with
+every manual test checkout, and a `PENDING_SYNC` row is transient by design — it is the outbox, and
+the next worker run resolves it to `SYNCED` or `FAILED`. At the time of writing there are five local
+orders, the fifth being one such manual test placed while the worker was stopped.
+
+| | Origin | Outcome | Evidence of origin | Catalog it exercised |
+|---|---|---|---|---|
+| Order 1 | **Phase 5 verification** — the controlled test described in §4 | `SYNCED` | idempotency key matches this project's verification-script pattern; customer details are the synthetic fixture; 6 attempts, which is the record of the bugs that run exposed | the old Shopify seed catalog |
+| Order 2 | **Manual UI checkout** through the storefront | `SYNCED` | browser-minted UUID key from `CheckoutForm`; customer details are **not** the fixture; 1 attempt | the **electronics** catalog |
+| Orders 3–4 | **Manual UI checkouts**, 2026-09-30 | `FAILED`, `failureReason = draft_create_user_error` | browser-minted UUID keys; 1 attempt each | the **electronics** catalog (at its pre-respec prices) |
+| Order 5 | **Manual UI checkout**, 2026-10-01, placed after the phone fix shipped | `PENDING_SYNC` — the worker was stopped, so it has not been submitted | browser-minted UUID key | the **electronics** catalog |
+
+Orders 3 and 4 are worth reading rather than skipping, because they are the permanent-failure path
+working exactly as designed:
+
+- `draftOrderCreate` returned the userError **`phone: Phone is invalid`** for both.
+- That is classified **permanent**, not retryable: the same phone number would be refused on every
+  retry, so retrying would burn five attempts to reach the same answer.
+- `shopifyDraftOrderId` and `shopifyOrderId` are both null on each, confirmed against Shopify — **no
+  draft and no order was created**, so nothing is stranded and nothing needs cleaning up.
+- Each has `attempt = 1` and one `JobLog` row reading `PENDING_SYNC -> FAILED, retryable = false`.
+
+These two orders are what prompted the phone-validation fix. The checkout used to require only a
+*non-empty* phone number, on the reasoning that formats vary by country and the courier is the real
+validator. The courier is not the first validator — Shopify is — so the rule now runs **before** the
+local order is created:
+
+| Claim | Evidence |
+|---|---|
+| Phone format is validated server-side before the write | `customerPhone` in `checkout.schema.ts` normalises to E.164 and fails the parse otherwise, so `placeOrder` returns `validation_failed` at step 1, before the idempotency lookup, the variant re-read, the transaction or the enqueue |
+| Nothing is written or queued when it fails | integration tests assert `order.count() === 0`, `orderItem.count() === 0`, the injected enqueuer uncalled, and the **real BullMQ** queue's job counts unchanged |
+| The rule is calibrated against reality, not taste | the validator accepts both numbers Shopify accepted and rejects both it refused — all four shapes this store has actually seen (`tests/unit/phone.test.ts`) |
+| It stays practical internationally | `+` or the ITU `00` prefix, any human separators, 7–15 digits per E.164; no numbering-plan database, because wrong guesses there would reject real customers |
+| The shopper can act on the error | the message always names a valid example, and it is keyed `customerPhone` so the form renders it on the field |
+| The full phone number is never logged | the validator logs nothing; the service logs only an issue **count**, and `customerPhone` is in `REDACT_PATHS` |
+
+What remains open is the **visibility** half: an order that fails permanently for any other reason
+still has no admin UI (**D4**). These two `FAILED` orders were left exactly as they are.
 
 So the electronics catalog has its own end-to-end evidence, which §4 cannot provide: §4's test ran
 against a seed-catalog product.
 
-Neither was created accidentally. No verification script has issued a checkout request since §4,
-and order 2 predates the branding and variant work that followed it. No order was placed during the
-catalog migration itself, nor during the variant cleanup.
+None was created accidentally. No verification script has issued a checkout request since §4: the
+§5b browser run loaded the checkout page but never submitted it, and the three orders the phone
+verification did place were deleted afterwards along with their queued jobs, behind a guard that
+refused to touch any order carrying a Shopify id or a non-fixture name. No order was placed during
+the catalog migration or the variant cleanup.
+
+Order 5 is worth one line of its own, because it is unplanned evidence: it is a real human checkout
+through the storefront, placed **after** the phone validation shipped, and its phone number is
+stored in exact E.164 form (`+` followed by 12 digits, no separators). The new rule therefore
+accepts a genuine order rather than blocking one — which a passing test suite alone cannot show.
+
+Shopify also holds **12 draft orders** left by the Phase 5 debugging described in §4. Each is an
+unused draft, not an order: nothing was charged and nothing will ship. There is no sweep for them
+(**D5**).
 
 Order identifiers, references, idempotency keys and customer details are deliberately not
 reproduced here; the orders are described by origin, product, amount and status only.

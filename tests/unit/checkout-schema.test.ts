@@ -179,9 +179,35 @@ describe("checkoutSchema: customer fields", () => {
     expect(checkoutSchema.safeParse({ ...VALID, customerNote: "a".repeat(2001) }).success).toBe(false);
   });
 
-  it("accepts a phone number in any of the formats a customer might type", () => {
-    for (const phone of ["03001234567", "+92 300 1234567", "(042) 111-222-333"]) {
-      expect(checkoutSchema.safeParse({ ...VALID, customerPhone: phone }).success).toBe(true);
+  /**
+   * This block replaces a test that asserted the opposite -- that *any* non-empty
+   * phone string was accepted, "(042) 111-222-333" included. That test passed
+   * for the whole project and pinned the bug in place: Shopify refuses a number
+   * like that with `phone: Phone is invalid`, but only after the local order has
+   * committed and the shopper has seen a confirmation page. The rule now lives
+   * in front of the write, so the suite has to say so.
+   */
+  it("accepts an international number in any spelling a customer might type", () => {
+    for (const phone of ["+923001234567", "+92 300 1234567", "+92-300-1234567", "0092 300 1234567"]) {
+      const result = checkoutSchema.safeParse({ ...VALID, customerPhone: phone });
+      expect(result.success, phone).toBe(true);
+      // Stored in one canonical form, whatever the shopper typed.
+      if (result.success) expect(result.data.customerPhone).toBe("+923001234567");
+    }
+  });
+
+  it("rejects a phone number Shopify would refuse, with a message on the phone field", () => {
+    for (const phone of ["03001234567", "(042) 111-222-333", "9".repeat(12), "+92", "no digits"]) {
+      const result = checkoutSchema.safeParse({ ...VALID, customerPhone: phone });
+      expect(result.success, phone).toBe(false);
+      if (!result.success) {
+        const errors = formatIssues(result.error);
+        // Keyed exactly `customerPhone`: that is what the form renders. A nested
+        // key such as `customerPhone.customerPhone` would show the shopper
+        // nothing, which is the failure mode this validation exists to prevent.
+        expect(Object.keys(errors), phone).toContain("customerPhone");
+        expect(errors.customerPhone, phone).toContain("+923001234567");
+      }
     }
   });
 });

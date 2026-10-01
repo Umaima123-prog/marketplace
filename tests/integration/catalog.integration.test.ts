@@ -184,6 +184,22 @@ describe("listing price", () => {
     expect(products[0].compareAtPrice).toBe("1234567890123.4567");
   });
 
+  it("reports priceVaries only when the active variants differ in price", async () => {
+    await seedProduct({ handle: "one-price", variants: [{ price: "10.00" }, { price: "10.00" }] });
+    await seedProduct({ handle: "two-prices", variants: [{ price: "10.00" }, { price: "12.00" }] });
+    // An inactive cheaper variant is not part of the range the shopper can buy.
+    await seedProduct({
+      handle: "inactive-cheaper",
+      variants: [{ price: "5.00", isActive: false }, { price: "10.00" }],
+    });
+
+    const { products } = await listProducts();
+    const byHandle = Object.fromEntries(products.map((p) => [p.handle, p]));
+    expect(byHandle["one-price"].priceVaries).toBe(false);
+    expect(byHandle["two-prices"].priceVaries).toBe(true);
+    expect(byHandle["inactive-cheaper"].priceVaries).toBe(false);
+  });
+
   it("suppresses a compare-at price that is not actually higher", async () => {
     // Struck-through text claiming a discount that does not exist is a lie.
     await seedProduct({ handle: "fake-sale", variants: [{ price: "10.00", compareAtPrice: "10.00" }] });
@@ -244,6 +260,7 @@ describe("listing does not leak internal fields", () => {
         "fromPrice",
         "handle",
         "image",
+        "priceVaries",
         "title",
         "variantCount",
         "vendor",

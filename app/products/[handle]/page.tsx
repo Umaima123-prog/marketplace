@@ -39,28 +39,26 @@ export default async function ProductDetailPage({
   if (!product) notFound();
 
   return (
-    <StorefrontLayout
-      title={product.title}
-      subtitle={product.vendor ?? undefined}
-      breadcrumb={
-        <ol className="breadcrumb float-sm-right bg-transparent p-0 mb-0">
-          <li className="breadcrumb-item">
-            <Link href="/">Catalog</Link>
-          </li>
-          <li className="breadcrumb-item active">{product.title}</li>
-        </ol>
-      }
-    >
-      <div className="card">
-        <div className="card-body">
+    // No page title here: the panel renders the product name as the page's <h1>,
+    // beside the price and the buying controls where a shopper looks for it.
+    <StorefrontLayout>
+      <ol className="breadcrumb bg-transparent px-0 py-0 mb-3 small">
+        <li className="breadcrumb-item">
+          <Link href="/">Electronics</Link>
+        </li>
+        <li className="breadcrumb-item active">{product.title}</li>
+      </ol>
+
+      <div className="card storefront-card">
+        <div className="card-body p-4">
           <ProductPurchasePanel product={product} />
         </div>
       </div>
 
       {product.descriptionHtml ? (
-        <div className="card">
+        <div className="card storefront-card">
           <div className="card-header">
-            <h2 className="card-title h6 mb-0">Description</h2>
+            <h2 className="card-title h6 mb-0">Product details</h2>
           </div>
           <div className="card-body">
             {/*
