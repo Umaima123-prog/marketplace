@@ -36,6 +36,7 @@ storefront's source of truth and a separate worker process owning every Shopify 
 | Permanent-failure path | **2 local orders `FAILED`**, both refused by Shopify at draft creation (`phone: Phone is invalid`), correctly classified non-retryable with no draft and no Shopify order created. Their cause is now validated out at the checkout boundary — see [VERIFICATION.md](VERIFICATION.md) §5a |
 | Storefront UX | **58 checks** in a real headless browser: variant switching, sold-out states, quantity caps, cart, checkout and three viewport widths (VERIFICATION.md §5b) |
 | Deployed on Railway | Web service **Online**; all four migrations applied to the production MySQL; a full sync completed with `productsApplied = 10`, `variantsUpserted = 19`, `finalised = COMPLETED`; the live storefront serves the 10 products. One production-only bug (a transaction budget too small for remote latency) was found and fixed — [VERIFICATION.md](VERIFICATION.md) §5c. No worker service is deployed yet |
+| Coverage | **36.21%** statements unit / **51.47%** integration, measured with V8 — the two suites cover deliberately different layers, so read them together. Full breakdown, strongest areas and honest gaps in [TEST_COVERAGE.md](TEST_COVERAGE.md) |
 | Demo video | <https://www.loom.com/share/02fc3b42859640d9b1428029c730b425> |
 
 Details, including what was *not* verified live, are in [VERIFICATION.md](VERIFICATION.md).
@@ -70,6 +71,7 @@ If you have ten minutes, these are the files where the design actually lives.
 | What decides retry vs give up? | `src/lib/shopify/errors.ts`, `src/lib/orders/shopify-port.ts` |
 | How does money stay exact? | `src/lib/money.ts`, and the `CHECK` constraints in `prisma/migrations/20260929053009_init/migration.sql` |
 | What stops the storefront calling Shopify? | `src/server/catalog/catalog.service.ts` — `server-only`, so a violation is a build error |
+| What is actually tested, and what is not? | [`TEST_COVERAGE.md`](TEST_COVERAGE.md) — per-suite coverage, the strongest files, and the four groups of gaps |
 
 The commit history is phase-by-phase and each message explains the decisions in that phase:
 

@@ -17,6 +17,11 @@ const eslintConfig = defineConfig([
     // generate -- linting it produced ~2,300 problems in code nobody edits, and
     // drowned any real finding in our own source.
     "src/generated/**",
+    // Coverage reports, emitted by `vitest run --coverage`. Machine-generated,
+    // gitignored, and the bundled HTML assets carry their own eslint-disable
+    // directives -- which this config then reports as unused, turning a clean
+    // lint into two warnings about files nobody wrote.
+    "coverage/**",
   ]),
 ]);
 
