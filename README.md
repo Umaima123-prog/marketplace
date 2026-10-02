@@ -56,7 +56,7 @@ and risks (§9).
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Web | Next.js 16 (App Router, Turbopack), React 19 | Server Components by default; five client components and one client hook in total |
+| Web | Next.js 16 (App Router, Turbopack), React 19 | Server Components by default; six client components and one client hook in total |
 | Language | TypeScript (strict) | |
 | Database | MySQL 8.4 via Prisma 6 | `DECIMAL(18,4)` money; hand-written CHECK constraints |
 | Queue | BullMQ 6 on Redis 7 | ID-only job payloads |

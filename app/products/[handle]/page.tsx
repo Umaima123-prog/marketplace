@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 
 import { StorefrontLayout } from "@/src/components/storefront/StorefrontLayout";
+import { ProductInfoTabs } from "@/src/components/storefront/ProductInfoTabs";
 import { ProductPurchasePanel } from "@/src/components/storefront/ProductPurchasePanel";
 import { getProductByHandle } from "@/src/server/catalog/catalog.service";
 
@@ -39,41 +40,33 @@ export default async function ProductDetailPage({
   if (!product) notFound();
 
   return (
-    // No page title here: the panel renders the product name as the page's <h1>,
-    // beside the price and the buying controls where a shopper looks for it.
-    <StorefrontLayout>
-      <ol className="breadcrumb bg-transparent px-0 py-0 mb-3 small">
-        <li className="breadcrumb-item">
-          <Link href="/">Electronics</Link>
-        </li>
-        <li className="breadcrumb-item active">{product.title}</li>
-      </ol>
-
-      <div className="card storefront-card">
-        <div className="card-body p-4">
+    // Section name on the left, breadcrumb on the right -- the reference's page
+    // header. The product's own name is the <h1> inside the card, beside the
+    // price and the buying controls, which is where a shopper looks for it.
+    <StorefrontLayout
+      title="Electronics"
+      breadcrumb={
+        <ol className="breadcrumb float-sm-right bg-transparent p-0 mb-0">
+          <li className="breadcrumb-item">
+            <Link href="/">Home</Link>
+          </li>
+          <li className="breadcrumb-item active">{product.title}</li>
+        </ol>
+      }
+    >
+      <div className="card storefront-card storefront-pdp-card">
+        <div className="card-body">
           <ProductPurchasePanel product={product} />
         </div>
       </div>
 
-      {product.descriptionHtml ? (
-        <div className="card storefront-card">
-          <div className="card-header">
-            <h2 className="card-title h6 mb-0">Product details</h2>
-          </div>
-          <div className="card-body">
-            {/*
-              Shopify-authored HTML. It is rendered as markup because that is
-              what a product description is, and it is trusted for exactly one
-              reason: it comes from the merchant's own Shopify admin via the
-              sync worker, never from a shopper. No user input reaches this.
-            */}
-            <div
-              className="storefront-description"
-              dangerouslySetInnerHTML={{ __html: product.descriptionHtml }}
-            />
-          </div>
-        </div>
-      ) : null}
+      {/*
+        Description, Comments and Rating, matching the reference. Only
+        Description carries data: this project has no reviews or comments
+        backend, so the other two are honest empty states with no submission
+        form. See ProductInfoTabs for why that is the rendering chosen.
+      */}
+      <ProductInfoTabs descriptionHtml={product.descriptionHtml} />
     </StorefrontLayout>
   );
 }

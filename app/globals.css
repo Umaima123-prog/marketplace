@@ -327,6 +327,364 @@
   cursor: not-allowed;
 }
 
+/* --- product detail page --------------------------------------------------- */
+
+/*
+ * Modelled on the AdminLTE 3 "E-commerce Product" page supplied as the visual
+ * reference. AdminLTE is already vendored here, so this leans on its idioms
+ * (nav-tabs, card, badge) rather than re-implementing them.
+ *
+ * Everything is namespaced `storefront-pdp-` so the catalog, cart and checkout
+ * keep the styling they already had -- this is one page, not a theme change.
+ * AdminLTE's `.content-wrapper` already supplies the light grey page ground, so
+ * no background is overridden.
+ */
+.storefront-pdp-card {
+  border: 1px solid var(--storefront-line);
+  border-radius: var(--storefront-radius);
+  margin-bottom: 1.5rem;
+}
+
+.storefront-pdp-card > .card-body {
+  padding: 1.5rem;
+}
+
+@media (min-width: 992px) {
+  .storefront-pdp-card > .card-body {
+    padding: 2rem;
+  }
+}
+
+/* --- gallery -------------------------------------------------------------- */
+
+/*
+ * The reference puts the product photo straight onto the card with no frame, so
+ * the product itself is the only thing in that half. A fixed aspect ratio keeps
+ * the right-hand column from jumping when a variant image of different
+ * dimensions is selected.
+ */
+.storefront-pdp-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  background: var(--storefront-surface);
+  overflow: hidden;
+}
+
+@supports not (aspect-ratio: 1 / 1) {
+  .storefront-pdp-stage {
+    height: 26rem;
+  }
+}
+
+.storefront-pdp-stage--empty {
+  background: var(--storefront-tile);
+  border: 1px solid var(--storefront-line);
+  border-radius: var(--storefront-radius);
+}
+
+.storefront-pdp-stage-image {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+/* Bordered white tiles in a row, as in the reference. */
+.storefront-pdp-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.storefront-pdp-thumb {
+  width: 4.75rem;
+  height: 4.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.375rem;
+  background: var(--storefront-surface);
+  border: 1px solid var(--storefront-line);
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.storefront-pdp-thumb:hover {
+  border-color: #adb5bd;
+}
+
+.storefront-pdp-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/*
+ * The selected thumbnail is marked by BOTH colour and a ring, not colour alone:
+ * on a row of near-identical product photos the active tile has to be obvious.
+ */
+.storefront-pdp-thumb--active {
+  border-color: var(--storefront-accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+}
+
+/* --- product information -------------------------------------------------- */
+
+/* Large and light, like the reference title -- not a heavy display weight. */
+.storefront-pdp-title {
+  font-size: 1.875rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--storefront-ink);
+  margin: 0.5rem 0 1rem;
+}
+
+@media (min-width: 992px) {
+  .storefront-pdp-title {
+    font-size: 2.125rem;
+  }
+}
+
+/* Body copy, not a caption: the reference runs a full paragraph here. */
+.storefront-pdp-lead {
+  color: #4b5563;
+  font-size: 1rem;
+  line-height: 1.65;
+  margin-bottom: 0;
+}
+
+.storefront-pdp-rule {
+  border-top: 1px solid var(--storefront-line);
+  margin: 1.5rem 0;
+}
+
+/* "Available Colors" -- a real heading, large and light. */
+.storefront-pdp-section-heading {
+  font-size: 1.5rem;
+  font-weight: 500;
+  color: var(--storefront-ink);
+  margin: 0 0 0.75rem;
+}
+
+/* --- option swatches ------------------------------------------------------- */
+
+.storefront-pdp-options {
+  margin-bottom: 1.5rem;
+}
+
+/*
+ * One bordered group with the cells divided by hairlines, as in the reference
+ * colour picker. `inline-flex` so the group hugs its cells instead of
+ * stretching across the column; it wraps on a narrow screen.
+ */
+.storefront-pdp-swatches {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--storefront-line);
+  border-radius: 0.25rem;
+  overflow: hidden;
+  background: var(--storefront-surface);
+  max-width: 100%;
+}
+
+.storefront-pdp-swatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-width: 6rem;
+  padding: 0.875rem 1rem;
+  background: var(--storefront-surface);
+  border: 0;
+  border-right: 1px solid var(--storefront-line);
+  color: var(--storefront-ink);
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.storefront-pdp-swatch:last-child {
+  border-right: 0;
+}
+
+.storefront-pdp-swatch:hover {
+  background: #f1f4f9;
+}
+
+/* Selected: tinted, with an inset ring so it reads without relying on colour. */
+.storefront-pdp-swatch--active {
+  background: #eaf1ff;
+  box-shadow: inset 0 0 0 2px var(--storefront-accent);
+}
+
+/*
+ * A sold-out option is dimmed but still selectable, so a shopper can look at it
+ * and see the price and the Sold Out state rather than meeting a dead control.
+ */
+.storefront-pdp-swatch--soldout .storefront-pdp-swatch-label,
+.storefront-pdp-swatch--soldout .storefront-pdp-dot {
+  opacity: 0.5;
+}
+
+.storefront-pdp-swatch-label {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.storefront-pdp-swatch-note {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #b4232a;
+}
+
+/* The reference filled circle, sized to read at a glance. */
+.storefront-pdp-dot {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+/* A pale swatch needs its own edge or it disappears against the white cell. */
+.storefront-pdp-dot--outlined {
+  box-shadow: inset 0 0 0 1px rgba(31, 45, 61, 0.3);
+}
+
+/* --- price box ------------------------------------------------------------- */
+
+/*
+ * The reference solid slate panel. Deliberately the one dark block on the page,
+ * so the eye lands on the price before anything else.
+ */
+.storefront-pdp-price-box {
+  background: #5f6b7a;
+  color: #fff;
+  padding: 1.25rem 1.5rem;
+  border-radius: 0.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.storefront-pdp-price-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.storefront-pdp-price {
+  font-size: 2.25rem;
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.storefront-pdp-price-compare {
+  font-size: 1.125rem;
+  text-decoration: line-through;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.storefront-pdp-price-note {
+  margin: 0.375rem 0 0;
+  font-size: 0.9375rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* --- stock, quantity, CTA -------------------------------------------------- */
+
+.storefront-pdp-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem;
+  margin-bottom: 1.25rem;
+}
+
+/*
+ * Quantity above, CTA below at full width.
+ *
+ * The reference sets Add to Cart beside an Add to Wishlist button. There is no
+ * wishlist here and inventing one would mean inventing a backend, so the single
+ * real action takes the width the pair occupied.
+ */
+.storefront-pdp-buy > .form-group {
+  margin-bottom: 0.875rem;
+}
+
+.storefront-pdp-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  margin: 0;
+}
+
+.storefront-pdp-cta-icon {
+  flex: 0 0 auto;
+}
+
+/* --- description tabs ------------------------------------------------------ */
+
+/* Bootstrap nav-tabs supplies the lifted active tab; this only seats it. */
+.storefront-pdp-tabhead {
+  background: transparent;
+  padding: 0;
+}
+
+.storefront-pdp-tabhead .nav-tabs {
+  padding: 0 1rem;
+  border-bottom: 1px solid var(--storefront-line);
+}
+
+/*
+ * Inactive tabs read as links and the active one is the lifted white card, as
+ * in the reference. `nav-link` is a <button> here rather than an <a>, so the
+ * button chrome is cleared and the pointer restored.
+ */
+.storefront-pdp-tabhead .nav-link {
+  background: none;
+  border-top-left-radius: 0.25rem;
+  border-top-right-radius: 0.25rem;
+  font-weight: 600;
+  color: var(--storefront-accent);
+  cursor: pointer;
+}
+
+.storefront-pdp-tabhead .nav-link:hover {
+  color: var(--storefront-accent-dark, #1d4ed8);
+}
+
+.storefront-pdp-tabhead .nav-link.active {
+  color: var(--storefront-ink);
+  background: var(--storefront-surface);
+  cursor: default;
+}
+
+/* Keyboard focus has to stay visible: these are real buttons. */
+.storefront-pdp-tabhead .nav-link:focus-visible {
+  outline: 2px solid var(--storefront-accent);
+  outline-offset: -2px;
+}
+
+/* The empty states for Comments and Rating -- quiet, and plainly empty. */
+.storefront-pdp-empty {
+  margin: 0;
+  padding: 1.5rem 0;
+  color: var(--storefront-muted);
+  text-align: center;
+}
+
 /* --- cart and checkout ----------------------------------------------------- */
 
 .storefront-line-thumb {
