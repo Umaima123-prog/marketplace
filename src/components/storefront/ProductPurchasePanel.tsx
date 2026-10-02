@@ -264,94 +264,117 @@ export function ProductPurchasePanel({ product }: { product: ProductDetailView }
               </p>
             </div>
 
-            {/* ---- stock + sku ------------------------------------------ */}
-            <div className="storefront-pdp-status">
-              {selected.available ? (
-                <span className="badge badge-success">In Stock</span>
-              ) : (
-                <span className="badge badge-danger">Sold Out</span>
-              )}
-              {/*
-                Quantity is shown only when Shopify tracks it. For an untracked
-                variant the stored number is meaningless, and printing "0 left"
-                would be actively wrong.
-              */}
-              {selected.available && selected.inventoryQuantity !== null ? (
-                <span className="text-muted small">{selected.inventoryQuantity} available</span>
-              ) : null}
-              {selected.sku ? (
-                <span className="storefront-detail-sku">SKU {selected.sku}</span>
-              ) : null}
-            </div>
-
-            {/* ---- quantity + add to cart -------------------------------- */}
-            <div className="storefront-pdp-buy">
-              <div className="form-group mb-0">
-                <label className="storefront-option-label" htmlFor="quantity-input">
-                  Quantity
-                </label>
-                <input
-                  id="quantity-input"
-                  type="number"
-                  className="form-control storefront-quantity"
-                  min={1}
-                  max={maxQuantity}
-                  step={1}
-                  value={quantity}
-                  disabled={!selected.available}
-                  onChange={(event) => {
-                    const next = Number.parseInt(event.target.value, 10);
-                    if (Number.isNaN(next)) return;
-                    setRequestedQuantity(next);
-                  }}
-                />
+            {/*
+              Stock row, buying control and note as ONE block, so their spacing
+              can tighten together when the variant is sold out. Sold out, the
+              three lines read as a single statement: what the state is, the
+              control that is unavailable, and what to do about it.
+            */}
+            <div
+              className={`storefront-pdp-purchase${
+                selected.available ? "" : " storefront-pdp-purchase--soldout"
+              }`}
+            >
+              <div className="storefront-pdp-status">
+                {selected.available ? (
+                  <span className="badge badge-success">In Stock</span>
+                ) : (
+                  <span className="badge badge-danger">Sold Out</span>
+                )}
                 {/*
-                  `max` on the input stops the spinner and a typed-in number past
-                  the cap, but the clamp above is what actually decides -- an
-                  attribute is a convenience, never the rule.
+                  Quantity is shown only when Shopify tracks it. For an untracked
+                  variant the stored number is meaningless, and printing "0 left"
+                  would be actively wrong.
                 */}
-                {stockLimited && maxQuantity < MAX_LINE_QUANTITY ? (
-                  <small className="form-text text-muted">
-                    {maxQuantity} in stock for this option.
-                  </small>
+                {selected.available && selected.inventoryQuantity !== null ? (
+                  <span className="text-muted small">{selected.inventoryQuantity} available</span>
+                ) : null}
+                {selected.sku ? (
+                  <span className="storefront-detail-sku">SKU {selected.sku}</span>
                 ) : null}
               </div>
 
-              {/*
-                Adds the VARIANT ID and the quantity to the cart, and nothing else
-                -- not the price rendered above it. That price is display only; the
-                cart page and the checkout each re-read it from MySQL.
+              {/* ---- quantity + add to cart -------------------------------- */}
+              <div className="storefront-pdp-buy">
+                {/*
+                  NOT RENDERED when the variant is sold out, rather than rendered
+                  disabled. There is no quantity to choose of something that
+                  cannot be bought, and a greyed field still asks the shopper to
+                  read it and work out why it is dead. Removing it also pulls the
+                  Sold Out button up against the stock row, which is the whole
+                  point of the compact state.
 
-                `available` came from the server too, so this button being enabled
-                is a hint, not a guarantee: the server checks stock again at
-                checkout, because between this render and that request the stock can
-                go to zero.
-              */}
-              <button
-                type="button"
-                className="btn btn-primary btn-block storefront-cta storefront-pdp-cta"
-                disabled={!selected.available}
-                onClick={() => {
-                  add(selected.id, quantity);
-                  setAddedVariantId(selected.id);
-                }}
-              >
-                <CartIcon />
-                <span>{selected.available ? "Add to Cart" : "Sold Out"}</span>
-              </button>
+                  The clamp and `maxQuantity` above are untouched, so the stock
+                  rules are exactly as they were -- this hides a control, it does
+                  not relax a limit.
+                */}
+                {selected.available ? (
+                  <div className="form-group mb-0">
+                    <label className="storefront-option-label" htmlFor="quantity-input">
+                      Quantity
+                    </label>
+                    <input
+                      id="quantity-input"
+                      type="number"
+                      className="form-control storefront-quantity"
+                      min={1}
+                      max={maxQuantity}
+                      step={1}
+                      value={quantity}
+                      onChange={(event) => {
+                        const next = Number.parseInt(event.target.value, 10);
+                        if (Number.isNaN(next)) return;
+                        setRequestedQuantity(next);
+                      }}
+                    />
+                    {/*
+                      `max` on the input stops the spinner and a typed-in number past
+                      the cap, but the clamp above is what actually decides -- an
+                      attribute is a convenience, never the rule.
+                    */}
+                    {stockLimited && maxQuantity < MAX_LINE_QUANTITY ? (
+                      <small className="form-text text-muted">
+                        {maxQuantity} in stock for this option.
+                      </small>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {/*
+                  Adds the VARIANT ID and the quantity to the cart, and nothing else
+                  -- not the price rendered above it. That price is display only; the
+                  cart page and the checkout each re-read it from MySQL.
+
+                  `available` came from the server too, so this button being enabled
+                  is a hint, not a guarantee: the server checks stock again at
+                  checkout, because between this render and that request the stock can
+                  go to zero.
+                */}
+                <button
+                  type="button"
+                  className="btn btn-primary btn-block storefront-cta storefront-pdp-cta"
+                  disabled={!selected.available}
+                  onClick={() => {
+                    add(selected.id, quantity);
+                    setAddedVariantId(selected.id);
+                  }}
+                >
+                  <CartIcon />
+                  <span>{selected.available ? "Add to Cart" : "Sold Out"}</span>
+                </button>
+              </div>
+              {justAdded ? (
+                <p className="storefront-pdp-note text-success">
+                  Added to your cart. <Link href="/cart">View cart</Link>
+                </p>
+              ) : (
+                <p className="storefront-pdp-note text-muted">
+                  {selected.available
+                    ? "Pay in cash when your order is delivered."
+                    : "This option is sold out. Choose another option, or check back later."}
+                </p>
+              )}
             </div>
-
-            {justAdded ? (
-              <p className="text-success small mt-3 mb-0">
-                Added to your cart. <Link href="/cart">View cart</Link>
-              </p>
-            ) : (
-              <p className="text-muted small mt-3 mb-0">
-                {selected.available
-                  ? "Pay in cash when your order is delivered."
-                  : "This option is sold out. Choose another option, or check back later."}
-              </p>
-            )}
           </>
         ) : (
           <div className="alert alert-secondary mb-0 mt-3">

@@ -611,6 +611,24 @@
 }
 
 /*
+ * Sold out, the stock row, the dead button and the explanation are one thought,
+ * so the gaps between them close up. In stock there is a quantity field between
+ * the row and the button, and the looser rhythm is correct.
+ */
+.storefront-pdp-purchase--soldout .storefront-pdp-status {
+  margin-bottom: 0.625rem;
+}
+
+.storefront-pdp-note {
+  margin: 1rem 0 0;
+  font-size: 0.875rem;
+}
+
+.storefront-pdp-purchase--soldout .storefront-pdp-note {
+  margin-top: 0.625rem;
+}
+
+/*
  * Quantity above, CTA below at full width.
  *
  * The reference sets Add to Cart beside an Add to Wishlist button. There is no
