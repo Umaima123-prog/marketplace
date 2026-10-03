@@ -17,9 +17,14 @@
     "start:production": "node scripts/start-production.mjs"
   },
   "dependencies": {
+    "@bull-board/api": "^9.10.2",
+    "@bull-board/hono": "^9.10.2",
+    "@bull-board/ui": "^9.10.2",
+    "@hono/node-server": "^1.19.17",
     "@prisma/client": "6.19.3",
     "bootstrap": "^4.6.2",
     "bullmq": "^6.3.9",
+    "hono": "^4.13.12",
     "ioredis": "^6.0.0",
     "next": "16.3.6",
     "pino": "^10.3.1",
